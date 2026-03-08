@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+venv/
+
+# Local app data
+config.json
+inkxmynovel_novel_list.txt
+inkxmynovel_progress_*.txt
+
+# Archives and temporary files
+*.rar
+*.zip
+*.7z
+*.tmp
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
