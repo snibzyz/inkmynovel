@@ -85,6 +85,7 @@ class ScheduleConfig:
     skip_enabled: bool
     skip_start: str
     skip_end: str
+    interval_unit: str = "minutes"
 
 
 @dataclass
@@ -133,22 +134,27 @@ def compute_schedule_datetimes(file_count: int, cfg: ScheduleConfig):
     skip_start = cfg.skip_start if cfg.skip_enabled else None
     skip_end = cfg.skip_end if cfg.skip_enabled else None
     daily_limit = max(1, int(cfg.chapters_per_day or 1)) if cfg.limit_per_day_enabled else None
-    scheduled_today = 0
     current_dt = base_dt
+    current_day = base_dt.date()
+    scheduled_today = 0
     for _ in range(file_count):
         while True:
             if skip_start and skip_end:
                 t_str = current_dt.strftime("%H:%M")
-                if skip_start <= t_str < skip_end:
-                    current_dt = current_dt.replace(hour=int(skip_end.split(":")[0]), minute=int(skip_end.split(":")[1]))
+                if is_time_in_skip_window(t_str, skip_start, skip_end):
+                    current_dt = advance_out_of_skip_window(current_dt, skip_start, skip_end)
                     continue
             break
+        if daily_limit is not None and current_dt.date() != current_day:
+            current_day = current_dt.date()
+            scheduled_today = 0
         result.append(current_dt)
         scheduled_today += 1
         if daily_limit is not None and scheduled_today >= daily_limit:
             scheduled_today = 0
             next_day = current_dt + timedelta(days=1)
             current_dt = next_day.replace(hour=int(start_parts[0]), minute=int(start_parts[1]))
+            current_day = current_dt.date()
         else:
             current_dt += timedelta(minutes=cfg.interval_minutes)
     return result
@@ -251,7 +257,12 @@ def write_json(path: Path, data):
 
 
 def sort_file_paths(paths: List[str]):
-    return sorted(paths, key=lambda p: (Path(p).stem, p))
+    def sort_key(path: str):
+        stem = Path(path).stem
+        episode_no = extract_episode_number_from_text(stem)
+        return (episode_no is None, episode_no if episode_no is not None else stem.lower(), stem.lower(), path.lower())
+
+    return sorted(paths, key=sort_key)
 
 
 def normalize_episode_title_text(text: str) -> str:
@@ -279,6 +290,58 @@ def extract_episode_number_from_text(text: str) -> Optional[int]:
             except Exception:
                 continue
     return None
+
+
+def is_episode_free_by_rule(episode_number: Optional[int], rule_text: str, custom_text: str = "") -> bool:
+    if episode_number is None:
+        return False
+    rule_text = (rule_text or "").strip()
+    custom_text = (custom_text or "").strip()
+    if "กำหนดเอง" in rule_text:
+        try:
+            custom_numbers = {int(x.strip()) for x in custom_text.split(",") if x.strip().isdigit()}
+        except Exception:
+            custom_numbers = set()
+        return episode_number in custom_numbers
+    if "ลงท้ายด้วย 5, 0" in rule_text:
+        return episode_number % 5 == 0
+    if "ลงท้ายด้วย 0" in rule_text:
+        return episode_number % 10 == 0
+    if "ลงท้ายด้วย 5" in rule_text:
+        return episode_number % 10 == 5
+    if "ทุก 3 ตอน" in rule_text:
+        return episode_number % 3 == 0
+    if "ทุก 5 ตอน" in rule_text:
+        return episode_number % 5 == 0
+    if "ทุก 10 ตอน" in rule_text:
+        return episode_number % 10 == 0
+    return False
+
+
+def extract_episode_numbers_from_paths(paths: List[str]) -> List[int]:
+    episode_numbers = []
+    for path in paths or []:
+        number = extract_episode_number_from_text(Path(path).stem)
+        if number is not None:
+            episode_numbers.append(number)
+    return episode_numbers
+
+
+def is_time_in_skip_window(time_text: str, skip_start: str, skip_end: str) -> bool:
+    if not skip_start or not skip_end or skip_start == skip_end:
+        return False
+    if skip_start < skip_end:
+        return skip_start <= time_text < skip_end
+    return time_text >= skip_start or time_text < skip_end
+
+
+def advance_out_of_skip_window(current_dt: datetime, skip_start: str, skip_end: str) -> datetime:
+    end_hour, end_minute = [int(part) for part in skip_end.split(":")]
+    adjusted = current_dt.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+    current_time_text = current_dt.strftime("%H:%M")
+    if skip_start > skip_end and current_time_text >= skip_start:
+        adjusted += timedelta(days=1)
+    return adjusted
 
 
 def replace_episode_number_in_text(text: str, new_number: int) -> str:
@@ -378,11 +441,16 @@ class MyNovelBot:
             options.binary_location = chrome_path
         if headless:
             options.add_argument("--headless=new")
+        options.add_argument("--window-size=1600,1200")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--no-first-run")
         options.add_argument("--no-default-browser-check")
         options.add_argument("--remote-debugging-port=0")
+        options.add_argument("--disable-background-timer-throttling")
+        options.add_argument("--disable-renderer-backgrounding")
+        options.add_argument("--disable-backgrounding-occluded-windows")
+        options.add_argument("--disable-features=CalculateNativeWinOcclusion")
         if runtime_profile.user_data_dir:
             options.add_argument(f"--user-data-dir={runtime_profile.user_data_dir}")
         if runtime_profile.profile_dir_name:
@@ -401,6 +469,10 @@ class MyNovelBot:
         if temp_root:
             self._driver_temp_dirs[id(driver)] = temp_root
         driver.set_page_load_timeout(60)
+        try:
+            driver.set_window_rect(0, 0, 1600, 1200)
+        except Exception:
+            pass
         return driver
 
     def ensure_logged_in(self, driver, wait):
@@ -540,6 +612,28 @@ class MyNovelBot:
             except Exception:
                 continue
         return None
+
+    def click_choice_by_keywords(self, driver, root, keywords):
+        lowered_keywords = [keyword.lower() for keyword in keywords if keyword]
+        candidates = root.find_elements(By.XPATH, ".//button | .//label | .//*[@role='radio'] | .//div[@role='radio']")
+        for candidate in candidates:
+            try:
+                text = ((candidate.text or "") + " " + (candidate.get_attribute("aria-label") or "")).strip().lower()
+                if not text:
+                    continue
+                if not any(keyword in text for keyword in lowered_keywords):
+                    continue
+                if not candidate.is_displayed() or not candidate.is_enabled():
+                    continue
+                try:
+                    self.scroll_modal_element_into_view(driver, candidate)
+                except Exception:
+                    pass
+                self.click_element(driver, candidate)
+                return True
+            except Exception:
+                continue
+        return False
 
     def find_body_input(self, driver):
         selectors = [
@@ -904,7 +998,12 @@ class MyNovelBot:
             self.scroll_modal_element_into_view(driver, section)
         except Exception:
             pass
-        self.select_radio_value(driver, section, target_value, "กำหนดราคา")
+        try:
+            self.select_radio_value(driver, section, target_value, "กำหนดราคา")
+        except Exception:
+            fallback_keywords = ["ติดเหรียญ", "ขาย", "coin"] if target_value == "paid" else ["ฟรี", "ไม่ขาย"]
+            if not self.click_choice_by_keywords(driver, section, fallback_keywords):
+                raise
         if target_value != "paid":
             self.log_debug(driver, "ตั้งราคาแบบฟรีสำเร็จ")
             return
@@ -1110,10 +1209,12 @@ class MyNovelBot:
         submit_button = None
         candidates = [
             (By.CSS_SELECTOR, "button[type='submit']"),
+            (By.CSS_SELECTOR, "button[data-slot='button']"),
             (By.XPATH, ".//button[@type='submit' and contains(., 'สร้างตอน')]"),
             (By.XPATH, ".//button[contains(., 'สร้างตอน')]"),
             (By.XPATH, ".//button[contains(., 'บันทึก')]"),
             (By.XPATH, ".//button[contains(., 'เผยแพร่')]"),
+            (By.XPATH, ".//button[contains(@aria-label, 'สร้างตอน') or contains(@aria-label, 'เผยแพร่') or contains(@aria-label, 'บันทึก')]"),
         ]
         for by, value in candidates:
             try:
@@ -1126,6 +1227,22 @@ class MyNovelBot:
                     break
             except Exception:
                 continue
+        if submit_button is None and dialog is not None:
+            try:
+                footer_buttons = dialog.find_elements(By.XPATH, ".//button")
+                for btn in reversed(footer_buttons):
+                    try:
+                        button_text = ((btn.text or "") + " " + (btn.get_attribute("aria-label") or "")).strip()
+                        button_type = (btn.get_attribute("type") or "").strip().lower()
+                        if not btn.is_displayed() or not btn.is_enabled():
+                            continue
+                        if button_type == "submit" or any(keyword in button_text for keyword in ["สร้างตอน", "เผยแพร่", "บันทึก", "submit"]):
+                            submit_button = btn
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
         if submit_button is None:
             raise RuntimeError("กดปุ่มสร้างตอนไม่สำเร็จ: ไม่พบปุ่ม submit")
 
@@ -1251,6 +1368,7 @@ def save_novel_list(novels):
 
 class UploadWorker(QObject):
     status = pyqtSignal(str)
+    job_finished = pyqtSignal(int, bool, str)
     finished = pyqtSignal(bool, str)
 
     def __init__(self, job, profile, existing_driver=None):
@@ -1405,13 +1523,15 @@ class UploadWorker(QObject):
                         title_text = (cells[2].find_element(By.CSS_SELECTOR, ".truncate").text or "").strip()
                     except Exception:
                         title_text = (cells[2].text or "").strip()
-                order_no = extract_episode_number_from_text(order_text)
-                if order_no is None and title_text:
-                    order_no = extract_episode_number_from_text(title_text)
-                if order_no is None and not title_text:
+                row_order_no = extract_episode_number_from_text(order_text)
+                title_number = extract_episode_number_from_text(title_text)
+                effective_number = title_number if title_number is not None else row_order_no
+                if effective_number is None and not title_text:
                     continue
                 return {
-                    "order": order_no,
+                    "order": row_order_no,
+                    "title_number": title_number,
+                    "sequence_number": effective_number,
                     "title": title_text,
                     "normalized_title": normalize_episode_title_text(title_text),
                 }
@@ -1434,7 +1554,9 @@ class UploadWorker(QObject):
         if latest_row is None:
             bot.log("ไม่พบตารางตอนเดิมบนเว็บ จะข้ามการตรวจสอบลำดับก่อนอัปโหลด")
             return plan
-        latest_number = latest_row.get("order")
+        latest_number = latest_row.get("sequence_number")
+        latest_order = latest_row.get("order")
+        latest_title_number = latest_row.get("title_number")
         latest_title = latest_row.get("title") or ""
         normalized_latest = latest_row.get("normalized_title") or ""
         normalized_first = normalize_episode_title_text(first_title)
@@ -1448,7 +1570,8 @@ class UploadWorker(QObject):
                     )
                 plan["renumber_offset"] = expected_number - first_number
                 bot.log(
-                    f"ตรวจพบลำดับไม่ต่อเนื่อง จะ fallback renumber อัตโนมัติ | ล่าสุดบนเว็บ: {latest_number} '{latest_title}' | "
+                    f"ตรวจพบลำดับไม่ต่อเนื่อง จะ fallback renumber อัตโนมัติ | ล่าสุดบนเว็บ: {latest_number} '{latest_title}'"
+                    f" (title={latest_title_number if latest_title_number is not None else '-'} row={latest_order if latest_order is not None else '-'}) | "
                     f"ไฟล์แรก: {first_number} '{first_title}' | จะเริ่มลงเป็นตอนที่ {expected_number}"
                 )
             elif normalized_latest and normalized_first and normalized_latest == normalized_first:
@@ -1461,7 +1584,8 @@ class UploadWorker(QObject):
                 )
             else:
                 bot.log(
-                    f"ตรวจสอบลำดับก่อนอัปโหลดผ่าน | ล่าสุดบนเว็บ: {latest_number} '{latest_title}' | "
+                    f"ตรวจสอบลำดับก่อนอัปโหลดผ่าน | ล่าสุดบนเว็บ: {latest_number} '{latest_title}'"
+                    f" (title={latest_title_number if latest_title_number is not None else '-'} row={latest_order if latest_order is not None else '-'}) | "
                     f"ไฟล์แรก: {first_number if first_number is not None else '-'} '{first_title}'"
                 )
         else:
@@ -1485,7 +1609,11 @@ class UploadWorker(QObject):
 
     def verify_episode_created(self, bot, driver, wait, previous_latest_row, expected_title):
         normalized_expected = normalize_episode_title_text(expected_title)
-        previous_order = previous_latest_row.get("order") if previous_latest_row else None
+        previous_sequence = None
+        previous_order = None
+        if previous_latest_row:
+            previous_sequence = previous_latest_row.get("sequence_number")
+            previous_order = previous_latest_row.get("order")
         latest_row = None
         deadline = time.time() + 15.0
         while time.time() < deadline:
@@ -1494,10 +1622,13 @@ class UploadWorker(QObject):
                 time.sleep(0.5)
                 continue
             normalized_latest = latest_row.get("normalized_title") or ""
+            latest_sequence = latest_row.get("sequence_number")
             latest_order = latest_row.get("order")
             if normalized_expected and normalized_latest == normalized_expected:
-                if previous_order is None or latest_order is None or latest_order >= previous_order:
+                if previous_sequence is None or latest_sequence is None or latest_sequence >= previous_sequence:
                     return latest_row
+            if previous_sequence is not None and latest_sequence is not None and latest_sequence > previous_sequence:
+                return latest_row
             if previous_order is not None and latest_order is not None and latest_order > previous_order:
                 return latest_row
             time.sleep(0.5)
@@ -1650,12 +1781,26 @@ class UploadWorker(QObject):
             current_price_mode = self.job.price_mode
             current_price_value = self.job.price_value
             if self.job.price_mode == "auto_free":
-                free_chapters = set((self.job.auto_free_details or {}).get("free_chapters_list", []))
-                current_price_mode = "free" if (original_index + 1) in free_chapters else "paid"
+                auto_free_details = self.job.auto_free_details or {}
+                episode_number_in_title = extract_episode_number_from_text(title) or extract_episode_number_from_text(Path(filename).stem)
+                check_index = episode_number_in_title if episode_number_in_title is not None else (original_index + 1)
+                is_free = is_episode_free_by_rule(
+                    check_index,
+                    auto_free_details.get("rule", ""),
+                    auto_free_details.get("custom_numbers", ""),
+                )
+                if not is_free:
+                    free_chapters = set(auto_free_details.get("free_chapters_list", []))
+                    is_free = check_index in free_chapters
+                current_price_mode = "free" if is_free else "paid"
 
             bot.log(f"เริ่มอัปโหลด ({index + 1}/{len(entries)}): {Path(filename).name}")
             if title != original_title:
                 bot.log(f"fallback renumber title: '{original_title}' -> '{title}'")
+            if current_price_mode == "paid":
+                bot.log(f"pricing: paid {current_price_value} coins | episode_number={check_index if self.job.price_mode == 'auto_free' else '-'} | chapter_index={original_index + 1}")
+            else:
+                bot.log(f"pricing: free | episode_number={check_index if self.job.price_mode == 'auto_free' else '-'} | chapter_index={original_index + 1}")
             episode_started = time.perf_counter()
             try:
                 step_started = time.perf_counter()
@@ -1709,12 +1854,28 @@ class UploadWorker(QObject):
                 for index, job in enumerate(self.jobs):
                     self.job = job
                     self.status.emit(f"เริ่มงานนิยาย {index + 1}/{len(self.jobs)}: {(job.novel_keyword or getattr(job, 'working_url_override', '') or 'นิยายใหม่')}")
-                    self.run_existing_driver_job(bot, self.existing_driver)
+                    try:
+                        self.run_existing_driver_job(bot, self.existing_driver)
+                        self.job_finished.emit(index, True, "สำเร็จ")
+                    except Exception as error:
+                        error_message = str(error).strip() or repr(error)
+                        self.job_finished.emit(index, False, f"{type(error).__name__}: {error_message}")
+                        raise
             else:
                 for index, job in enumerate(self.jobs):
                     self.job = job
                     self.status.emit(f"เริ่มงานนิยาย {index + 1}/{len(self.jobs)}: {(job.novel_keyword or getattr(job, 'working_url_override', '') or 'นิยายใหม่')}")
-                    bot.run_job(job, self.profile)
+                    try:
+                        driver = bot.create_driver(job.chrome_path, self.profile, headless=job.headless)
+                        try:
+                            self.run_existing_driver_job(bot, driver)
+                        finally:
+                            bot.cleanup_driver(driver)
+                        self.job_finished.emit(index, True, "สำเร็จ")
+                    except Exception as error:
+                        error_message = str(error).strip() or repr(error)
+                        self.job_finished.emit(index, False, f"{type(error).__name__}: {error_message}")
+                        raise
             self.finished.emit(True, "อัปโหลดเสร็จสิ้น")
         except Exception as error:
             error_message = str(error).strip() or repr(error)
@@ -1934,7 +2095,9 @@ class UploaderGUI(QWidget):
         self.free_radio = QRadioButton("ตอนฟรี (ไม่ขาย)")
         self.free_radio.setChecked(True)
         self.sell_radio = QRadioButton("ตอนติดเหรียญ (ขายตลอดไป)")
-        self.auto_free_radio = QRadioButton("เลือกตอนฟรีอัตโนมัติ")
+        self.auto_free_radio = QRadioButton("เลือกตอนฟรีอัตโนมัติ (ตอนอื่นขายตามราคา)")
+        self.free_radio.toggled.connect(lambda _: self.toggle_auto_free_options(self.auto_free_radio.isChecked()))
+        self.sell_radio.toggled.connect(lambda _: self.toggle_auto_free_options(self.auto_free_radio.isChecked()))
         self.auto_free_radio.toggled.connect(self.toggle_auto_free_options)
         self.price_mode_group.addButton(self.free_radio)
         self.price_mode_group.addButton(self.sell_radio)
@@ -2044,10 +2207,11 @@ class UploaderGUI(QWidget):
         self.toggle_time_filter_group(False)
         self.toggle_time_filter_options(Qt.CheckState.Unchecked.value)
 
-        self.auto_free_group = QGroupBox("🎲 8. ตั้งค่าตอนฟรีอัตโนมัติ")
+        self.auto_free_group = QGroupBox("🎲 8. ตั้งค่าตอนฟรีอัตโนมัติ / ราคาตอนขาย")
         auto_free_layout = QGridLayout()
         auto_free_layout.setSpacing(grid_spacing)
-        auto_free_layout.addWidget(QLabel("กฎการเลือกตอนฟรี:"), 0, 0)
+        self.free_rule_label = QLabel("กฎการเลือกตอนฟรี (ตอนที่ไม่เข้า rule จะขายตามราคา):")
+        auto_free_layout.addWidget(self.free_rule_label, 0, 0)
         self.free_rule_combo = QComboBox()
         self.free_rule_combo.addItems([
             "ตอนที่ลงท้ายด้วย 5, 0 (เช่น 5, 10, 15, 20...)",
@@ -2060,12 +2224,14 @@ class UploaderGUI(QWidget):
         ])
         self.free_rule_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         auto_free_layout.addWidget(self.free_rule_combo, 0, 1, 1, 3)
-        auto_free_layout.addWidget(QLabel("กำหนดเอง (เช่น 1,5,10,15):"), 1, 0)
+        self.custom_free_label = QLabel("กำหนดเอง (เช่น 1,5,10,15):")
+        auto_free_layout.addWidget(self.custom_free_label, 1, 0)
         self.custom_free_input = QLineEdit()
         self.custom_free_input.setPlaceholderText("ใส่หมายเลขตอนที่ต้องการให้ฟรี คั่นด้วยเครื่องหมายจุลภาค")
         self.custom_free_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         auto_free_layout.addWidget(self.custom_free_input, 1, 1, 1, 3)
-        auto_free_layout.addWidget(QLabel("ราคาเหรียญตอนขาย:"), 2, 0)
+        self.price_spin_label = QLabel("ราคาเหรียญตอนขาย:")
+        auto_free_layout.addWidget(self.price_spin_label, 2, 0)
         self.price_spin = QSpinBox()
         self.price_spin.setRange(0, 999)
         self.price_spin.setValue(DEFAULT_PRICE)
@@ -2342,7 +2508,14 @@ class UploaderGUI(QWidget):
             self.chapters_per_day_spin.setValue(int(schedule.get("chapters_per_day", 5)))
             self.check_duplicate_same_day.setChecked(bool(schedule.get("limit_per_day_enabled", True)))
             interval_minutes = int(schedule.get("interval_minutes", 10))
-            if interval_minutes % 60 == 0 and interval_minutes >= 60:
+            interval_unit = (schedule.get("interval_unit") or "").strip().lower()
+            if interval_unit == "hours":
+                self.interval_unit_hours.setChecked(True)
+                self.interval_value_spin.setValue(max(1, interval_minutes // 60))
+            elif interval_unit == "minutes":
+                self.interval_unit_minutes.setChecked(True)
+                self.interval_value_spin.setValue(max(1, interval_minutes))
+            elif interval_minutes % 60 == 0 and interval_minutes >= 60:
                 self.interval_unit_hours.setChecked(True)
                 self.interval_value_spin.setValue(max(1, interval_minutes // 60))
             else:
@@ -2563,7 +2736,13 @@ class UploaderGUI(QWidget):
             self.calc_button.setEnabled(checked)
 
     def toggle_auto_free_options(self, checked):
-        self.auto_free_group.setEnabled(checked)
+        self.free_rule_label.setEnabled(checked)
+        self.free_rule_combo.setEnabled(checked)
+        self.custom_free_label.setEnabled(checked)
+        self.custom_free_input.setEnabled(checked)
+        paid_enabled = checked or self.sell_radio.isChecked()
+        self.price_spin_label.setEnabled(paid_enabled)
+        self.price_spin.setEnabled(paid_enabled)
 
     def toggle_time_filter_group(self, checked):
         self.time_filter_group.setEnabled(checked)
@@ -2596,38 +2775,52 @@ class UploaderGUI(QWidget):
         return "published"
 
     def get_free_chapters_list(self, total_chapters):
+        return self.compute_free_chapters_list(
+            total_chapters,
+            self.free_rule_combo.currentText(),
+            self.custom_free_input.text().strip(),
+            extract_episode_numbers_from_paths(self.file_paths),
+        )
+
+    def compute_free_chapters_list(self, total_chapters, rule_text, custom_text="", chapter_numbers=None):
         free_chapters = set()
-        rule_text = self.free_rule_combo.currentText()
+        rule_text = (rule_text or "").strip()
+        custom_text = (custom_text or "").strip()
+        candidate_numbers = [num for num in (chapter_numbers or []) if isinstance(num, int)]
+        if not candidate_numbers:
+            candidate_numbers = list(range(1, total_chapters + 1))
         if "กำหนดเอง" in rule_text:
-            custom_text = self.custom_free_input.text().strip()
             if custom_text:
                 try:
                     for num in [int(x.strip()) for x in custom_text.split(",") if x.strip().isdigit()]:
-                        if 1 <= num <= total_chapters:
+                        if num in candidate_numbers or (1 <= num <= total_chapters and not chapter_numbers):
                             free_chapters.add(num)
                 except ValueError:
                     pass
         elif "ลงท้ายด้วย 5, 0" in rule_text:
-            for i in range(1, total_chapters + 1):
-                if i % 5 == 0 or i % 10 == 0:
+            for i in candidate_numbers:
+                if i % 5 == 0:
                     free_chapters.add(i)
         elif "ลงท้ายด้วย 0" in rule_text:
-            for i in range(1, total_chapters + 1):
+            for i in candidate_numbers:
                 if i % 10 == 0:
                     free_chapters.add(i)
         elif "ลงท้ายด้วย 5" in rule_text:
-            for i in range(1, total_chapters + 1):
+            for i in candidate_numbers:
                 if i % 10 == 5:
                     free_chapters.add(i)
         elif "ทุก 3 ตอน" in rule_text:
-            for i in range(3, total_chapters + 1, 3):
-                free_chapters.add(i)
+            for i in candidate_numbers:
+                if i % 3 == 0:
+                    free_chapters.add(i)
         elif "ทุก 5 ตอน" in rule_text:
-            for i in range(5, total_chapters + 1, 5):
-                free_chapters.add(i)
+            for i in candidate_numbers:
+                if i % 5 == 0:
+                    free_chapters.add(i)
         elif "ทุก 10 ตอน" in rule_text:
-            for i in range(10, total_chapters + 1, 10):
-                free_chapters.add(i)
+            for i in candidate_numbers:
+                if i % 10 == 0:
+                    free_chapters.add(i)
         return sorted(free_chapters)
 
     def collect_schedule(self):
@@ -2642,6 +2835,7 @@ class UploaderGUI(QWidget):
             "chapters_per_day": self.chapters_per_day_spin.value(),
             "limit_per_day_enabled": self.check_duplicate_same_day.isChecked(),
             "interval_minutes": interval_minutes,
+            "interval_unit": "hours" if self.interval_unit_hours.isChecked() else "minutes",
             "skip_enabled": self.time_filter_checkbox.isChecked(),
             "skip_start": self.skip_start_time_edit.time().toString("HH:mm"),
             "skip_end": self.skip_end_time_edit.time().toString("HH:mm"),
@@ -2675,16 +2869,21 @@ class UploaderGUI(QWidget):
             novel_keyword = ""
         profile = self.resolve_profile()
         publish_mode = task.publish_mode or "published"
-        schedule = task.schedule or self.collect_schedule()
+        schedule = dict(task.schedule or {})
         if publish_mode == "scheduled":
             compute_schedule_datetimes(len(chapter_files), ScheduleConfig(**schedule))
         price_mode = task.price_mode or "free"
         auto_free_details = None
         if price_mode == "auto_free":
             auto_free_details = dict(task.auto_free_details or {})
-            auto_free_details.setdefault("rule", self.free_rule_combo.currentText())
+            auto_free_details.setdefault("rule", "ตอนที่ลงท้ายด้วย 5, 0 (เช่น 5, 10, 15, 20...)")
             auto_free_details.setdefault("custom_numbers", "")
-            auto_free_details["free_chapters_list"] = auto_free_details.get("free_chapters_list") or self.get_free_chapters_list(len(chapter_files))
+            auto_free_details["free_chapters_list"] = self.compute_free_chapters_list(
+                len(chapter_files),
+                auto_free_details.get("rule", ""),
+                auto_free_details.get("custom_numbers", ""),
+                extract_episode_numbers_from_paths(chapter_files),
+            )
         job = UploadJob(
             preset_name="",
             novel_keyword=novel_keyword,
@@ -2805,9 +3004,9 @@ class UploaderGUI(QWidget):
         self.calc_button.setEnabled((not busy) and self.schedule_radio.isChecked())
         self.login_button.setEnabled(not busy)
         self.close_login_button.setEnabled(not busy)
-        self.add_task_button.setEnabled(not busy)
+        self.add_task_button.setEnabled(True)
         self.remove_task_button.setEnabled(not busy)
-        self.task_list_widget.setEnabled(not busy)
+        self.task_list_widget.setEnabled(True)
 
     def confirm_allow_empty_novel(self, task_indices):
         for index in task_indices:
@@ -2829,6 +3028,19 @@ class UploaderGUI(QWidget):
             return reply == QMessageBox.StandardButton.Yes
         return False
 
+    def reset_task_statuses(self, task_indices, status="pending", clear_error=True):
+        for index in task_indices or []:
+            if index < 0 or index >= len(self.tasks):
+                continue
+            task = self.tasks[index]
+            if not (task.chapter_files or task.title_keyword or task.working_url_override):
+                continue
+            task.status = status
+            if clear_error:
+                task.last_error = ""
+        self.refresh_task_list_widget(selected_row=self.current_task_index)
+        self.save_settings()
+
     def start_jobs(self, jobs, task_indices):
         try:
             profile = self.resolve_profile()
@@ -2837,7 +3049,7 @@ class UploaderGUI(QWidget):
                 if not (task.chapter_files or task.title_keyword or task.working_url_override):
                     continue
                 if index in self.running_task_indices:
-                    task.status = "pending"
+                    task.status = "running"
                     task.last_error = ""
             self.save_settings()
             self.refresh_task_list_widget(selected_row=self.current_task_index)
@@ -2859,12 +3071,14 @@ class UploaderGUI(QWidget):
             else:
                 self.update_status("ใช้ session Login ที่เปิดค้างไว้อยู่แล้ว")
         except Exception as error:
+            self.reset_task_statuses(self.running_task_indices)
             self.running_task_indices = []
             QMessageBox.critical(self, "เปิดหน้า Login ไม่สำเร็จ", str(error))
             return
         try:
             driver.get("https://mynovel.co/dashboard/workings")
         except Exception as error:
+            self.reset_task_statuses(self.running_task_indices)
             self.running_task_indices = []
             QMessageBox.critical(self, "เปลี่ยนหน้าไม่สำเร็จ", str(error))
             return
@@ -2874,6 +3088,7 @@ class UploaderGUI(QWidget):
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.status.connect(self.update_status)
+        self.worker.job_finished.connect(lambda order, success, message, indices=list(task_indices): self.on_sequential_job_finished(indices[order] if 0 <= order < len(indices) else -1, success, message))
         self.worker.finished.connect(self.on_upload_finished)
         self.worker.finished.connect(self.thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
@@ -2949,6 +3164,14 @@ class UploaderGUI(QWidget):
         else:
             self.update_status("อัปโหลดพร้อมกันเสร็จสิ้น")
             QMessageBox.information(self, "สำเร็จ", "อัปโหลดพร้อมกันเสร็จสิ้น")
+
+    def on_sequential_job_finished(self, task_index, success, message):
+        if 0 <= task_index < len(self.tasks):
+            task = self.tasks[task_index]
+            task.status = "done" if success else "failed"
+            task.last_error = "" if success else message
+        self.refresh_task_list_widget(selected_row=self.current_task_index)
+        self.save_settings()
 
     def apply_current_task(self):
         self.save_current_task_from_form(refresh=False)
@@ -3050,9 +3273,16 @@ class UploaderGUI(QWidget):
             if index < 0 or index >= len(self.tasks):
                 continue
             task = self.tasks[index]
-            if task.chapter_files or task.title_keyword or task.working_url_override:
-                task.status = "done" if success else "failed"
-                task.last_error = "" if success else message
+            if not (task.chapter_files or task.title_keyword or task.working_url_override):
+                continue
+            if success:
+                if task.status == "running":
+                    task.status = "done"
+                    task.last_error = ""
+            else:
+                if task.status == "running":
+                    task.status = "pending"
+                    task.last_error = ""
         self.running_task_indices = []
         self.refresh_task_list_widget()
         self.save_settings()
