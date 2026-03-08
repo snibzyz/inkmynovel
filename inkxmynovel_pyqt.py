@@ -1,5 +1,7 @@
 import os
+import shutil
 import sys
+import tempfile
 import importlib.util
 import time
 from importlib.machinery import SourcelessFileLoader
@@ -221,15 +223,72 @@ def sort_file_paths(paths: List[str]):
 class MyNovelBot:
     def __init__(self, log_func=print):
         self.log_func = log_func
+        self._driver_temp_dirs = {}
 
     def log(self, msg: str):
         self.log_func(msg)
+
+    def prepare_profile_runtime_copy(self, profile: BrowserProfile):
+        if not profile.user_data_dir:
+            return profile, None
+
+        source_user_data_dir = Path(profile.user_data_dir)
+        if not source_user_data_dir.exists():
+            raise RuntimeError(f"ไม่พบโฟลเดอร์ Chrome profile: {source_user_data_dir}")
+
+        profile_dir_name = profile.profile_dir_name or "Default"
+        source_profile_dir = source_user_data_dir / profile_dir_name
+        if not source_profile_dir.exists() and (source_user_data_dir / "Preferences").exists():
+            source_profile_dir = source_user_data_dir
+            profile_dir_name = "Default"
+
+        if not source_profile_dir.exists():
+            raise RuntimeError(f"ไม่พบโฟลเดอร์โปรไฟล์ย่อย: {source_profile_dir}")
+
+        temp_root = Path(tempfile.mkdtemp(prefix="inkxmynovel_profile_"))
+        temp_user_data_dir = temp_root / "User Data"
+        temp_user_data_dir.mkdir(parents=True, exist_ok=True)
+
+        local_state_path = source_user_data_dir / "Local State"
+        if local_state_path.exists():
+            shutil.copy2(local_state_path, temp_user_data_dir / "Local State")
+
+        target_profile_dir = temp_user_data_dir / profile_dir_name
+        shutil.copytree(
+            source_profile_dir,
+            target_profile_dir,
+            ignore=shutil.ignore_patterns(
+                "Singleton*",
+                "LOCK",
+                "lockfile",
+                "DevToolsActivePort",
+                "Current Session",
+                "Current Tabs",
+                "Last Session",
+                "Last Tabs",
+                "Sessions",
+                "Crashpad*",
+                "BrowserMetrics*",
+            ),
+        )
+
+        return BrowserProfile(profile.label, str(temp_user_data_dir), profile_dir_name), temp_root
+
+    def cleanup_driver(self, driver):
+        temp_root = self._driver_temp_dirs.pop(id(driver), None)
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        if temp_root:
+            shutil.rmtree(temp_root, ignore_errors=True)
 
     def create_driver(self, chrome_path: str, profile: BrowserProfile, headless: bool = False):
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options as ChromeOptions
         from selenium.webdriver.chrome.service import Service as ChromeService
 
+        runtime_profile, temp_root = self.prepare_profile_runtime_copy(profile)
         options = ChromeOptions()
         if chrome_path:
             options.binary_location = chrome_path
@@ -237,13 +296,26 @@ class MyNovelBot:
             options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        if profile.user_data_dir:
-            options.add_argument(f"--user-data-dir={profile.user_data_dir}")
-        if profile.profile_dir_name:
-            options.add_argument(f"--profile-directory={profile.profile_dir_name}")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        options.add_argument("--remote-debugging-port=0")
+        if runtime_profile.user_data_dir:
+            options.add_argument(f"--user-data-dir={runtime_profile.user_data_dir}")
+        if runtime_profile.profile_dir_name:
+            options.add_argument(f"--profile-directory={runtime_profile.profile_dir_name}")
         options.add_argument("--disable-blink-features=AutomationControlled")
         service = ChromeService()
-        driver = webdriver.Chrome(service=service, options=options)
+        try:
+            driver = webdriver.Chrome(service=service, options=options)
+        except Exception as error:
+            if temp_root:
+                shutil.rmtree(temp_root, ignore_errors=True)
+            raise RuntimeError(
+                "เปิด Chrome profile ไม่สำเร็จ: โปรไฟล์จริงอาจกำลังถูกใช้งาน หรือ Chrome เปิดไม่ขึ้นจาก profile นี้\n"
+                f"รายละเอียด: {error}"
+            )
+        if temp_root:
+            self._driver_temp_dirs[id(driver)] = temp_root
         driver.set_page_load_timeout(60)
         return driver
 
@@ -666,6 +738,28 @@ class MyNovelBot:
         except Exception:
             driver.execute_script("arguments[0].click();", element)
 
+    def find_schedule_day_button(self, popover, schedule_dt: datetime):
+        iso_day = schedule_dt.strftime("%Y-%m-%d")
+        short_day = f"{schedule_dt.month}/{schedule_dt.day}/{schedule_dt.year}"
+        selectors = [
+            f"button[data-day='{short_day}']",
+            f"td[data-day='{iso_day}'] button[data-day='{short_day}']",
+            f"td[data-day='{iso_day}'] button",
+            f"[data-day='{iso_day}'] button",
+        ]
+        for selector in selectors:
+            try:
+                candidates = popover.find_elements(By.CSS_SELECTOR, selector)
+            except Exception:
+                candidates = []
+            for candidate in candidates:
+                try:
+                    if candidate.is_displayed() and candidate.is_enabled() and not candidate.get_attribute("disabled"):
+                        return candidate
+                except Exception:
+                    continue
+        return None
+
     def blur_active_element(self, driver):
         try:
             driver.execute_script(
@@ -855,15 +949,7 @@ class MyNovelBot:
             raise RuntimeError("เลื่อนไปเดือนไม่สำเร็จ")
 
         target_day = f"{schedule_dt.month}/{schedule_dt.day}/{schedule_dt.year}"
-        day_buttons = popover.find_elements(By.CSS_SELECTOR, f"button[data-day='{target_day}']")
-        clickable_day = None
-        for day_button in day_buttons:
-            try:
-                if day_button.is_displayed() and day_button.is_enabled():
-                    clickable_day = day_button
-                    break
-            except Exception:
-                continue
+        clickable_day = self.find_schedule_day_button(popover, schedule_dt)
         if clickable_day is None:
             raise RuntimeError(f"ไม่พบวันที่ {target_day} ในปฏิทิน")
         self.click_in_popover(driver, clickable_day)
@@ -1048,10 +1134,7 @@ class MyNovelBot:
                     )
                     raise
         finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            self.cleanup_driver(driver)
 
 
 # End core definitions
@@ -1152,15 +1235,7 @@ class UploadWorker(QObject):
             popover = self.get_visible_schedule_popover(driver)
 
         target_day = f"{schedule_dt.month}/{schedule_dt.day}/{schedule_dt.year}"
-        day_buttons = popover.find_elements(By.CSS_SELECTOR, f"button[data-day='{target_day}']")
-        clickable_day = None
-        for day_button in day_buttons:
-            try:
-                if day_button.is_displayed() and day_button.is_enabled():
-                    clickable_day = day_button
-                    break
-            except Exception:
-                continue
+        clickable_day = self.find_schedule_day_button(popover, schedule_dt)
         if clickable_day is None:
             raise RuntimeError(f"ไม่พบวันที่ {target_day} ในปฏิทิน")
         self.click_element(driver, clickable_day)
@@ -1426,6 +1501,7 @@ class UploaderGUI(QWidget):
         self.last_novel_folder_path = self.settings.get("last_novel_folder_path", "")
         self.last_novel_list_path = self.settings.get("last_novel_list_path", "")
         self._initializing = True
+        self.login_bot = None
         self.login_driver = None
         self.thread = None
         self.worker = None
@@ -2129,18 +2205,23 @@ class UploaderGUI(QWidget):
             profile = self.resolve_profile()
             chrome_path = self.chrome_path_edit.text().strip()
             self.close_login_browser()
-            self.login_driver = MyNovelBot(self.update_status).open_login_browser(chrome_path, profile)
+            self.login_bot = MyNovelBot(self.update_status)
+            self.login_driver = self.login_bot.open_login_browser(chrome_path, profile)
             QMessageBox.information(self, "Login", "เปิดหน้า Login แล้ว กรุณาล็อกอินบนเบราว์เซอร์ จากนั้นค่อยกดเริ่มอัปโหลด")
         except Exception as error:
             QMessageBox.critical(self, "เปิดหน้า Login ไม่สำเร็จ", str(error))
 
     def close_login_browser(self):
         if self.login_driver:
-            try:
-                self.login_driver.quit()
-            except Exception:
-                pass
+            if self.login_bot is not None:
+                self.login_bot.cleanup_driver(self.login_driver)
+            else:
+                try:
+                    self.login_driver.quit()
+                except Exception:
+                    pass
             self.login_driver = None
+            self.login_bot = None
             self.update_status("ปิดหน้า Login แล้ว")
 
     def set_busy(self, busy):
@@ -2188,7 +2269,8 @@ class UploaderGUI(QWidget):
         try:
             chrome_path = self.chrome_path_edit.text().strip()
             self.close_login_browser()
-            self.login_driver = MyNovelBot(self.update_status).open_login_browser(chrome_path, profile)
+            self.login_bot = MyNovelBot(self.update_status)
+            self.login_driver = self.login_bot.open_login_browser(chrome_path, profile)
             QMessageBox.information(
                 self,
                 "Login",
