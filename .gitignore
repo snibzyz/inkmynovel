@@ -10,6 +10,7 @@ venv/
 config.json
 inkxmynovel_novel_list.txt
 inkxmynovel_progress_*.txt
+automation_profile/
 
 # Archives and temporary files
 *.rar

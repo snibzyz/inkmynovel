@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -26,6 +28,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -51,11 +55,33 @@ class BrowserProfile:
 
 
 @dataclass
+class NovelTask:
+    title_keyword: str = ""
+    working_url_override: str = ""
+    chapter_files: List[str] = field(default_factory=list)
+    run_mode: str = "fast"
+    headless: bool = False
+    sequence_policy: str = "auto_fix"
+    price_mode: str = "free"
+    price_value: int = DEFAULT_PRICE
+    publish_mode: str = "published"
+    schedule: Dict[str, Any] = field(default_factory=dict)
+    auto_free_details: Optional[Dict[str, Any]] = None
+    status: str = "pending"
+    last_error: str = ""
+
+    def display_name(self):
+        text = (self.title_keyword or "").strip() or (self.working_url_override or "").strip()
+        return text or "นิยายใหม่"
+
+
+@dataclass
 class ScheduleConfig:
     start_date: str
     start_time: str
     chapters_per_day: int
     interval_minutes: int
+    limit_per_day_enabled: bool
     skip_enabled: bool
     skip_start: str
     skip_end: str
@@ -77,11 +103,18 @@ class UploadJob:
     schedule: Dict[str, Any]
     reset_progress: bool
     run_mode: str
+    sequence_policy: str = "auto_fix"
     auto_free_details: Optional[Dict] = None
 
 
 def build_guest_profile():
     return BrowserProfile(label="Guest", user_data_dir="", profile_dir_name="")
+
+
+def build_automation_profile():
+    automation_root = APP_DIR / "automation_profile"
+    automation_root.mkdir(parents=True, exist_ok=True)
+    return BrowserProfile(label="Automation Profile", user_data_dir=str(automation_root), profile_dir_name="Default")
 
 
 def build_profile_from_custom_path(custom_path: str):
@@ -99,6 +132,7 @@ def compute_schedule_datetimes(file_count: int, cfg: ScheduleConfig):
     base_dt = datetime.strptime(cfg.start_date, "%Y-%m-%d").replace(hour=int(start_parts[0]), minute=int(start_parts[1]))
     skip_start = cfg.skip_start if cfg.skip_enabled else None
     skip_end = cfg.skip_end if cfg.skip_enabled else None
+    daily_limit = max(1, int(cfg.chapters_per_day or 1)) if cfg.limit_per_day_enabled else None
     scheduled_today = 0
     current_dt = base_dt
     for _ in range(file_count):
@@ -111,7 +145,7 @@ def compute_schedule_datetimes(file_count: int, cfg: ScheduleConfig):
             break
         result.append(current_dt)
         scheduled_today += 1
-        if scheduled_today >= cfg.chapters_per_day:
+        if daily_limit is not None and scheduled_today >= daily_limit:
             scheduled_today = 0
             next_day = current_dt + timedelta(days=1)
             current_dt = next_day.replace(hour=int(start_parts[0]), minute=int(start_parts[1]))
@@ -220,6 +254,53 @@ def sort_file_paths(paths: List[str]):
     return sorted(paths, key=lambda p: (Path(p).stem, p))
 
 
+def normalize_episode_title_text(text: str) -> str:
+    normalized = (text or "").strip().lower()
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
+
+def extract_episode_number_from_text(text: str) -> Optional[int]:
+    source = (text or "").strip()
+    if not source:
+        return None
+    patterns = [
+        r"ตอนที่\s*(\d+)",
+        r"ตอน\s*(\d+)",
+        r"chapter\s*(\d+)",
+        r"ep(?:isode)?\s*(\d+)",
+        r"(?:^|\D)(\d{1,6})(?:\D|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, source, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                continue
+    return None
+
+
+def replace_episode_number_in_text(text: str, new_number: int) -> str:
+    source = (text or "").strip()
+    if not source:
+        return f"ตอนที่ {new_number}"
+    replacements = [
+        (r"(ตอนที่\s*)(\d+)", r"\g<1>{}".format(new_number)),
+        (r"(ตอน\s*)(\d+)", r"\g<1>{}".format(new_number)),
+        (r"(chapter\s*)(\d+)", r"\g<1>{}".format(new_number)),
+        (r"(ep(?:isode)?\s*)(\d+)", r"\g<1>{}".format(new_number)),
+    ]
+    for pattern, repl in replacements:
+        updated, count = re.subn(pattern, repl, source, count=1, flags=re.IGNORECASE)
+        if count:
+            return updated
+    updated, count = re.subn(r"(\d{1,6})", str(new_number), source, count=1)
+    if count:
+        return updated
+    return f"ตอนที่ {new_number} {source}"
+
+
 class MyNovelBot:
     def __init__(self, log_func=print):
         self.log_func = log_func
@@ -283,12 +364,15 @@ class MyNovelBot:
         if temp_root:
             shutil.rmtree(temp_root, ignore_errors=True)
 
-    def create_driver(self, chrome_path: str, profile: BrowserProfile, headless: bool = False):
+    def create_driver(self, chrome_path: str, profile: BrowserProfile, headless: bool = False, use_runtime_copy: bool = True):
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options as ChromeOptions
         from selenium.webdriver.chrome.service import Service as ChromeService
 
-        runtime_profile, temp_root = self.prepare_profile_runtime_copy(profile)
+        if use_runtime_copy:
+            runtime_profile, temp_root = self.prepare_profile_runtime_copy(profile)
+        else:
+            runtime_profile, temp_root = profile, None
         options = ChromeOptions()
         if chrome_path:
             options.binary_location = chrome_path
@@ -336,9 +420,10 @@ class MyNovelBot:
                 title_text = (title_el.text or "").strip()
                 if keyword.lower() in title_text.lower() or title_text.lower() in keyword.lower():
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", card)
+                    previous_url = driver.current_url
                     driver.execute_script("arguments[0].click();", card)
-                    wait.until(lambda d: d.current_url != driver.current_url)
-                    return driver.current_url
+                    wait.until(lambda d: d.current_url != previous_url)
+                    return driver.current_url.split("?")[0] + "?tab=episode"
             except Exception:
                 continue
         raise RuntimeError(f"ไม่พบเรื่อง '{keyword}'")
@@ -358,28 +443,31 @@ class MyNovelBot:
             driver.execute_script("arguments[0].click();", element)
 
     def click_add_episode_button(self, driver, wait):
+        add_button_selectors = [
+            (By.CSS_SELECTOR, "button.bg-primary.text-white[type='button']"),
+            (By.CSS_SELECTOR, "button[class*='bg-primary'][class*='text-white'][type='button']"),
+            (By.XPATH, "//button[@type='button' and normalize-space(.)='เพิ่มตอน']"),
+            (By.XPATH, "//button[@type='button' and .//*[contains(@class, 'lucide-plus')] and contains(normalize-space(.), 'เพิ่มตอน')]"),
+            (By.XPATH, "//button[contains(normalize-space(.), 'เพิ่มตอน')]"),
+            (By.XPATH, "//button[contains(@class, 'bg-primary') and .//*[contains(@class, 'lucide-plus')]]"),
+        ]
+
         wait.until(
-            lambda d: len(
-                d.find_elements(
-                    By.XPATH,
-                    "//button[contains(normalize-space(.), 'เพิ่มตอน')]"
-                    " | //button[.//*[name()='svg'] and contains(normalize-space(.), 'เพิ่มตอน')]"
-                    " | //button[contains(@class, 'bg-primary') and .//*[contains(@class, 'lucide-plus')]]"
-                    " | //button[.//*[contains(@class, 'lucide-plus')]]",
-                )
-            ) > 0
+            lambda d: any(
+                len(d.find_elements(by, selector)) > 0
+                for by, selector in add_button_selectors
+            )
         )
-        add_buttons = driver.find_elements(
-            By.XPATH,
-            "//button[contains(normalize-space(.), 'เพิ่มตอน')]"
-            " | //button[.//*[name()='svg'] and contains(normalize-space(.), 'เพิ่มตอน')]"
-            " | //button[contains(@class, 'bg-primary') and .//*[contains(@class, 'lucide-plus')]]"
-            " | //button[.//*[contains(@class, 'lucide-plus')]]",
-        )
+        add_buttons = []
+        for by, selector in add_button_selectors:
+            try:
+                add_buttons.extend(driver.find_elements(by, selector))
+            except Exception:
+                continue
         if not add_buttons:
             add_buttons = driver.find_elements(By.CSS_SELECTOR, "button.bg-primary, button[class*='bg-primary']")
         current_url = driver.current_url
-        last_error = None
+        last_error = RuntimeError("ไม่พบฟอร์มเพิ่มตอนหลังจากกดปุ่ม")
         self.log_debug(driver, f"พบปุ่มเพิ่มตอน {len(add_buttons)} ปุ่ม")
         for btn in add_buttons:
             try:
@@ -402,7 +490,8 @@ class MyNovelBot:
                         )
                         self.log_debug(driver, "กดปุ่มเพิ่มตอนสำเร็จ")
                         return
-                    except TimeoutException:
+                    except TimeoutException as error:
+                        last_error = error
                         self.log_debug(driver, f"คลิกเพิ่มตอนแล้วแต่ยังไม่เห็นฟอร์ม (retry {attempt + 1}/2)")
                         time.sleep(0.3)
                         continue
@@ -1079,8 +1168,8 @@ class MyNovelBot:
         with open(progress_file, "a", encoding="utf-8") as f:
             f.write(f"{filename}\n")
 
-    def open_login_browser(self, chrome_path: str, profile: BrowserProfile):
-        driver = self.create_driver(chrome_path, profile, headless=False)
+    def open_login_browser(self, chrome_path: str, profile: BrowserProfile, persistent_profile: bool = False):
+        driver = self.create_driver(chrome_path, profile, headless=False, use_runtime_copy=not persistent_profile)
         driver.get("https://mynovel.co/auth")
         return driver
 
@@ -1166,7 +1255,8 @@ class UploadWorker(QObject):
 
     def __init__(self, job, profile, existing_driver=None):
         super().__init__()
-        self.job = job
+        self.jobs = job if isinstance(job, list) else [job]
+        self.job = self.jobs[0] if self.jobs else None
         self.profile = profile
         self.existing_driver = existing_driver
 
@@ -1297,6 +1387,125 @@ class UploadWorker(QObject):
         base_url = raw_url.split("?")[0]
         return f"{base_url}?tab=episode"
 
+    def get_latest_episode_row_info(self, driver, wait):
+        try:
+            wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "table tbody tr")) > 0 or len(d.find_elements(By.NAME, "chapterTitle")) > 0)
+        except Exception:
+            pass
+        rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+        for row in rows:
+            try:
+                cells = [cell for cell in row.find_elements(By.CSS_SELECTOR, "td") if cell.is_displayed()]
+                if len(cells) < 3:
+                    continue
+                order_text = (cells[1].text or "").strip()
+                title_text = (cells[2].text or "").strip()
+                if not title_text:
+                    try:
+                        title_text = (cells[2].find_element(By.CSS_SELECTOR, ".truncate").text or "").strip()
+                    except Exception:
+                        title_text = (cells[2].text or "").strip()
+                order_no = extract_episode_number_from_text(order_text)
+                if order_no is None and title_text:
+                    order_no = extract_episode_number_from_text(title_text)
+                if order_no is None and not title_text:
+                    continue
+                return {
+                    "order": order_no,
+                    "title": title_text,
+                    "normalized_title": normalize_episode_title_text(title_text),
+                }
+            except Exception:
+                continue
+        return None
+
+    def verify_episode_sequence_before_run(self, bot, driver, wait, files):
+        latest_row = self.get_latest_episode_row_info(driver, wait)
+        policy = getattr(self.job, "sequence_policy", "auto_fix") or "auto_fix"
+        plan = {
+            "latest_row": latest_row,
+            "renumber_start": None,
+            "renumber_offset": None,
+        }
+        if not files:
+            return plan
+        first_title, _ = read_chapter_file(files[0])
+        first_number = extract_episode_number_from_text(first_title) or extract_episode_number_from_text(Path(files[0]).stem)
+        if latest_row is None:
+            bot.log("ไม่พบตารางตอนเดิมบนเว็บ จะข้ามการตรวจสอบลำดับก่อนอัปโหลด")
+            return plan
+        latest_number = latest_row.get("order")
+        latest_title = latest_row.get("title") or ""
+        normalized_latest = latest_row.get("normalized_title") or ""
+        normalized_first = normalize_episode_title_text(first_title)
+        if latest_number is not None:
+            expected_number = latest_number + 1
+            plan["renumber_start"] = expected_number
+            if first_number is not None and first_number != expected_number:
+                if policy == "stop":
+                    raise RuntimeError(
+                        f"ลำดับตอนไม่ต่อเนื่อง: ตอนล่าสุดบนเว็บคือ {latest_number} '{latest_title}' แต่ไฟล์แรกที่จะลงคือ {first_number} '{first_title}'"
+                    )
+                plan["renumber_offset"] = expected_number - first_number
+                bot.log(
+                    f"ตรวจพบลำดับไม่ต่อเนื่อง จะ fallback renumber อัตโนมัติ | ล่าสุดบนเว็บ: {latest_number} '{latest_title}' | "
+                    f"ไฟล์แรก: {first_number} '{first_title}' | จะเริ่มลงเป็นตอนที่ {expected_number}"
+                )
+            elif normalized_latest and normalized_first and normalized_latest == normalized_first:
+                if policy == "stop":
+                    raise RuntimeError(f"ตรวจพบว่าตอนล่าสุดบนเว็บซ้ำกับไฟล์แรกที่จะลง: '{first_title}'")
+                base_number = first_number if first_number is not None else latest_number
+                plan["renumber_offset"] = expected_number - base_number
+                bot.log(
+                    f"ตรวจพบชื่อตอนแรกซ้ำกับตอนล่าสุดบนเว็บ จะ fallback renumber อัตโนมัติเป็นตอนที่ {expected_number}"
+                )
+            else:
+                bot.log(
+                    f"ตรวจสอบลำดับก่อนอัปโหลดผ่าน | ล่าสุดบนเว็บ: {latest_number} '{latest_title}' | "
+                    f"ไฟล์แรก: {first_number if first_number is not None else '-'} '{first_title}'"
+                )
+        else:
+            bot.log(
+                f"ไม่พบเลขตอนล่าสุดบนเว็บ จะใช้ชื่อตอนเดิมในการอัปโหลด | ล่าสุดบนเว็บ: '{latest_title}'"
+            )
+        return plan
+
+    def resolve_upload_title(self, original_title: str, filename: str, upload_index: int, sequence_plan):
+        latest_row = (sequence_plan or {}).get("latest_row")
+        renumber_start = (sequence_plan or {}).get("renumber_start")
+        renumber_offset = (sequence_plan or {}).get("renumber_offset")
+        if latest_row is None or renumber_start is None:
+            return original_title
+        original_number = extract_episode_number_from_text(original_title) or extract_episode_number_from_text(Path(filename).stem)
+        if renumber_offset is not None and original_number is not None:
+            target_number = original_number + renumber_offset
+        else:
+            target_number = renumber_start + upload_index
+        return replace_episode_number_in_text(original_title, target_number)
+
+    def verify_episode_created(self, bot, driver, wait, previous_latest_row, expected_title):
+        normalized_expected = normalize_episode_title_text(expected_title)
+        previous_order = previous_latest_row.get("order") if previous_latest_row else None
+        latest_row = None
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            latest_row = self.get_latest_episode_row_info(driver, wait)
+            if latest_row is None:
+                time.sleep(0.5)
+                continue
+            normalized_latest = latest_row.get("normalized_title") or ""
+            latest_order = latest_row.get("order")
+            if normalized_expected and normalized_latest == normalized_expected:
+                if previous_order is None or latest_order is None or latest_order >= previous_order:
+                    return latest_row
+            if previous_order is not None and latest_order is not None and latest_order > previous_order:
+                return latest_row
+            time.sleep(0.5)
+        raise RuntimeError(
+            f"ยืนยันหลังอัปโหลดไม่ผ่าน: ตอนล่าสุดบนเว็บยังไม่เปลี่ยนเป็น '{expected_title}'"
+            + (f" (ล่าสุดตอนนี้: '{(latest_row or {}).get('title', '')}')" if latest_row else "")
+        )
+
     def ensure_episode_tab(self, driver, wait):
         episode_url = self.normalize_episode_url(driver.current_url)
         if episode_url and driver.current_url != episode_url:
@@ -1338,9 +1547,15 @@ class UploadWorker(QObject):
                 bot.log(f"ใช้ URL เรื่องไม่ได้ จะ fallback ไปค้นหาจากชื่อเรื่อง: {error}")
                 driver.get("https://mynovel.co/dashboard/workings")
         try:
-            return self.find_working_url_from_cards(bot, driver, wait, self.job.novel_keyword)
+            driver.get("https://mynovel.co/dashboard/workings")
+            target_url = self.find_working_url_from_cards(bot, driver, wait, self.job.novel_keyword)
         except Exception:
-            return bot.find_working_url(driver, wait, self.job.novel_keyword)
+            target_url = bot.find_working_url(driver, wait, self.job.novel_keyword)
+        target_url = self.normalize_episode_url(target_url)
+        driver.get(target_url)
+        resolved_url = self.ensure_episode_tab(driver, wait)
+        bot.log(f"เปิดหน้าลงตอนจากชื่อเรื่องสำเร็จ: {resolved_url}")
+        return resolved_url
 
     def find_working_url_from_cards(self, bot, driver, wait, keyword):
         keyword_text = (keyword or "").strip().lower()
@@ -1403,7 +1618,7 @@ class UploadWorker(QObject):
                     except Exception:
                         driver.execute_script("arguments[0].click();", card)
                     wait.until(lambda d: d.current_url != current_url)
-                    return driver.current_url
+                    return self.normalize_episode_url(driver.current_url)
 
             if page_no >= 10:
                 break
@@ -1422,12 +1637,15 @@ class UploadWorker(QObject):
         schedule_plan = []
         if self.job.publish_mode == "scheduled":
             schedule_plan = compute_schedule_datetimes(len(entries), ScheduleConfig(**self.job.schedule))
+        sequence_plan = self.verify_episode_sequence_before_run(bot, driver, wait, files)
+        previous_latest_row = sequence_plan.get("latest_row")
         uploaded_count = 0
         total_elapsed_seconds = 0.0
         run_started_at = datetime.now()
 
         for index, (original_index, filename) in enumerate(entries):
-            title, body_lines = read_chapter_file(filename)
+            original_title, body_lines = read_chapter_file(filename)
+            title = self.resolve_upload_title(original_title, filename, index, sequence_plan)
             schedule_dt = schedule_plan[index] if self.job.publish_mode == "scheduled" else None
             current_price_mode = self.job.price_mode
             current_price_value = self.job.price_value
@@ -1436,6 +1654,8 @@ class UploadWorker(QObject):
                 current_price_mode = "free" if (original_index + 1) in free_chapters else "paid"
 
             bot.log(f"เริ่มอัปโหลด ({index + 1}/{len(entries)}): {Path(filename).name}")
+            if title != original_title:
+                bot.log(f"fallback renumber title: '{original_title}' -> '{title}'")
             episode_started = time.perf_counter()
             try:
                 step_started = time.perf_counter()
@@ -1447,6 +1667,9 @@ class UploadWorker(QObject):
                 step_started = time.perf_counter()
                 bot.submit_episode(driver, wait)
                 bot.log(f"เวลากดสร้างตอน: {time.perf_counter() - step_started:.2f}s")
+                step_started = time.perf_counter()
+                previous_latest_row = self.verify_episode_created(bot, driver, wait, previous_latest_row, title)
+                bot.log(f"เวลายืนยันตอนล่าสุดหลังอัปโหลด: {time.perf_counter() - step_started:.2f}s")
                 elapsed_seconds = time.perf_counter() - episode_started
                 uploaded_count += 1
                 total_elapsed_seconds += elapsed_seconds
@@ -1483,9 +1706,15 @@ class UploadWorker(QObject):
             bot = MyNovelBot(lambda message: self.status.emit(str(message)))
             self.patch_bot(bot)
             if self.existing_driver is not None:
-                self.run_existing_driver_job(bot, self.existing_driver)
+                for index, job in enumerate(self.jobs):
+                    self.job = job
+                    self.status.emit(f"เริ่มงานนิยาย {index + 1}/{len(self.jobs)}: {(job.novel_keyword or getattr(job, 'working_url_override', '') or 'นิยายใหม่')}")
+                    self.run_existing_driver_job(bot, self.existing_driver)
             else:
-                bot.run_job(self.job, self.profile)
+                for index, job in enumerate(self.jobs):
+                    self.job = job
+                    self.status.emit(f"เริ่มงานนิยาย {index + 1}/{len(self.jobs)}: {(job.novel_keyword or getattr(job, 'working_url_override', '') or 'นิยายใหม่')}")
+                    bot.run_job(job, self.profile)
             self.finished.emit(True, "อัปโหลดเสร็จสิ้น")
         except Exception as error:
             error_message = str(error).strip() or repr(error)
@@ -1498,6 +1727,8 @@ class UploaderGUI(QWidget):
         self.settings = read_json(QT_SETTINGS_FILE, read_json(OLD_QT_SETTINGS_FILE, {}))
         self.novel_list = load_novel_list()
         self.file_paths = []
+        self.tasks = []
+        self.current_task_index = -1
         self.last_novel_folder_path = self.settings.get("last_novel_folder_path", "")
         self.last_novel_list_path = self.settings.get("last_novel_list_path", "")
         self._initializing = True
@@ -1505,11 +1736,20 @@ class UploaderGUI(QWidget):
         self.login_driver = None
         self.thread = None
         self.worker = None
+        self.running_task_indices = []
+        self.parallel_threads = []
+        self.parallel_workers = []
+        self.parallel_pending_count = 0
+        self.parallel_results = {}
         self.profile_items = []
         self.profile_map = {}
         self.init_ui()
         self.load_ui_settings()
         self.refresh_profile_combo()
+        self.ensure_task_exists()
+        self.refresh_task_list_widget()
+        if self.tasks:
+            self.load_task_into_form(self.tasks[self.current_task_index if self.current_task_index >= 0 else 0])
         self._initializing = False
 
     def init_ui(self):
@@ -1555,6 +1795,26 @@ class UploaderGUI(QWidget):
         instruction_label.setObjectName("InstructionLabel")
         instruction_layout.addWidget(instruction_label)
         instruction_group.setLayout(instruction_layout)
+
+        task_group = QGroupBox("🗂️ งานนิยายที่รออัปโหลด")
+        task_layout = QHBoxLayout()
+        self.task_list_widget = QListWidget()
+        self.task_list_widget.setMinimumHeight(180)
+        self.task_list_widget.setMinimumWidth(260)
+        self.task_list_widget.currentRowChanged.connect(self.on_task_selected)
+        task_layout.addWidget(self.task_list_widget, 1)
+        task_button_layout = QVBoxLayout()
+        self.add_task_button = QPushButton("➕ เพิ่มนิยาย")
+        self.add_task_button.clicked.connect(self.add_task)
+        task_button_layout.addWidget(self.add_task_button)
+        self.remove_task_button = QPushButton("🗑️ ลบนิยาย")
+        self.remove_task_button.clicked.connect(self.remove_selected_task)
+        task_button_layout.addWidget(self.remove_task_button)
+        self.task_count_label = QLabel("ทั้งหมด 0 งาน")
+        task_button_layout.addWidget(self.task_count_label)
+        task_button_layout.addStretch(1)
+        task_layout.addLayout(task_button_layout)
+        task_group.setLayout(task_layout)
 
         novel_select_group = QGroupBox("📚 1. ชื่อเรื่อง (ใส่ให้ตรงกับเรื่องบนเว็บ)")
         novel_select_layout = QVBoxLayout()
@@ -1616,13 +1876,16 @@ class UploaderGUI(QWidget):
 
         browser_layout.addWidget(QLabel("Profile mode:"), 1, 0)
         profile_mode_layout = QHBoxLayout()
+        self.automation_profile_radio = QRadioButton("Automation Profile")
+        self.automation_profile_radio.setChecked(True)
         self.installed_profile_radio = QRadioButton("Installed Profile")
-        self.installed_profile_radio.setChecked(True)
         self.guest_profile_radio = QRadioButton("Guest Mode")
         self.custom_profile_radio = QRadioButton("Custom Folder")
+        self.automation_profile_radio.toggled.connect(self.toggle_profile_mode)
         self.installed_profile_radio.toggled.connect(self.toggle_profile_mode)
         self.guest_profile_radio.toggled.connect(self.toggle_profile_mode)
         self.custom_profile_radio.toggled.connect(self.toggle_profile_mode)
+        profile_mode_layout.addWidget(self.automation_profile_radio)
         profile_mode_layout.addWidget(self.installed_profile_radio)
         profile_mode_layout.addWidget(self.guest_profile_radio)
         profile_mode_layout.addWidget(self.custom_profile_radio)
@@ -1667,11 +1930,15 @@ class UploaderGUI(QWidget):
 
         mode_group = QGroupBox("🎯 5. โหมดตอน")
         mode_layout = QVBoxLayout()
+        self.price_mode_group = QButtonGroup(self)
         self.free_radio = QRadioButton("ตอนฟรี (ไม่ขาย)")
         self.free_radio.setChecked(True)
         self.sell_radio = QRadioButton("ตอนติดเหรียญ (ขายตลอดไป)")
         self.auto_free_radio = QRadioButton("เลือกตอนฟรีอัตโนมัติ")
         self.auto_free_radio.toggled.connect(self.toggle_auto_free_options)
+        self.price_mode_group.addButton(self.free_radio)
+        self.price_mode_group.addButton(self.sell_radio)
+        self.price_mode_group.addButton(self.auto_free_radio)
         mode_layout.addWidget(self.free_radio)
         mode_layout.addWidget(self.sell_radio)
         mode_layout.addWidget(self.auto_free_radio)
@@ -1679,12 +1946,16 @@ class UploaderGUI(QWidget):
 
         publish_group = QGroupBox("⏰ 6. รูปแบบการเผยแพร่")
         publish_layout = QVBoxLayout()
+        self.publish_mode_group = QButtonGroup(self)
         self.draft_radio = QRadioButton("ไม่เผยแพร่")
         self.publish_radio = QRadioButton("เผยแพร่ทันที")
         self.publish_radio.setChecked(True)
         self.schedule_radio = QRadioButton("ตั้งเวลาล่วงหน้า")
         self.schedule_radio.toggled.connect(self.toggle_schedule_options)
         self.schedule_radio.toggled.connect(self.toggle_time_filter_group)
+        self.publish_mode_group.addButton(self.draft_radio)
+        self.publish_mode_group.addButton(self.publish_radio)
+        self.publish_mode_group.addButton(self.schedule_radio)
         publish_layout.addWidget(self.draft_radio)
         publish_layout.addWidget(self.publish_radio)
         publish_layout.addWidget(self.schedule_radio)
@@ -1736,6 +2007,18 @@ class UploaderGUI(QWidget):
         schedule_layout.addWidget(self.check_duplicate_same_day, 2, 1, 1, 3)
         self.schedule_group.setLayout(schedule_layout)
         self.toggle_schedule_options(False)
+
+        self.sequence_policy_group = QGroupBox("🧠 7. นโยบายลำดับตอน")
+        sequence_policy_layout = QVBoxLayout()
+        self.sequence_policy_button_group = QButtonGroup(self)
+        self.sequence_stop_radio = QRadioButton("ถ้าเลขตอน/ชื่อตอนไม่ต่อ ให้หยุดและแจ้ง")
+        self.sequence_auto_fix_radio = QRadioButton("ถ้าเลขตอน/ชื่อตอนไม่ต่อ ให้แก้เลขตอนอัตโนมัติ")
+        self.sequence_auto_fix_radio.setChecked(True)
+        self.sequence_policy_button_group.addButton(self.sequence_stop_radio)
+        self.sequence_policy_button_group.addButton(self.sequence_auto_fix_radio)
+        sequence_policy_layout.addWidget(self.sequence_stop_radio)
+        sequence_policy_layout.addWidget(self.sequence_auto_fix_radio)
+        self.sequence_policy_group.setLayout(sequence_policy_layout)
 
         self.time_filter_group = QGroupBox("🚫 ข้ามเวลาลง (Time Filter)")
         time_filter_layout = QVBoxLayout()
@@ -1798,26 +2081,36 @@ class UploaderGUI(QWidget):
         self.calc_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation))
         self.calc_button.clicked.connect(self.show_estimate_dialog)
         self.calc_button.setEnabled(self.schedule_radio.isChecked())
-        self.start_button = QPushButton("  เริ่มอัปโหลด")
+        self.run_current_button = QPushButton("  รันเรื่องที่เลือก")
+        self.run_current_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.run_current_button.clicked.connect(self.apply_current_task)
+        self.start_button = QPushButton("  รันทั้งหมด (คิว)")
         self.start_button.setObjectName("StartButton")
         self.start_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOkButton))
         self.start_button.clicked.connect(self.apply_settings)
+        self.parallel_button = QPushButton("  รันพร้อมกัน")
+        self.parallel_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
+        self.parallel_button.clicked.connect(self.apply_parallel_settings)
         self.start_button.setDefault(True)
         button_layout.addStretch(1)
         button_layout.addWidget(cancel_button)
         button_layout.addWidget(self.calc_button)
+        button_layout.addWidget(self.run_current_button)
+        button_layout.addWidget(self.parallel_button)
         button_layout.addWidget(self.start_button)
 
         self.status_label = QLabel("พร้อมใช้งาน")
         self.status_label.setObjectName("StatusLabel")
 
         content_layout.addWidget(instruction_group)
+        content_layout.addWidget(task_group)
         content_layout.addWidget(novel_select_group)
         content_layout.addWidget(file_group)
         content_layout.addWidget(browser_group)
         content_layout.addWidget(mode_select_group)
         content_layout.addLayout(settings_layout)
         content_layout.addWidget(self.schedule_group)
+        content_layout.addWidget(self.sequence_policy_group)
         content_layout.addWidget(self.auto_free_group)
         content_layout.addWidget(self.time_filter_group)
         content_layout.addStretch(1)
@@ -1828,7 +2121,10 @@ class UploaderGUI(QWidget):
         outer_layout.addLayout(button_layout)
         self.center()
         self.update_novel_combo()
-        self.update_file_label()
+        self.ensure_task_exists()
+        self.refresh_task_list_widget()
+        if self.tasks:
+            self.load_task_into_form(self.tasks[0])
 
     def load_ui_settings(self):
         chrome_path = self.settings.get("chrome_path", detect_chrome_path())
@@ -1837,28 +2133,22 @@ class UploaderGUI(QWidget):
         run_mode = self.settings.get("run_mode", "fast")
         self.cloudflare_mode_radio.setChecked(run_mode == "cloudflare")
         self.fast_mode_radio.setChecked(run_mode != "cloudflare")
-        browser_mode = self.settings.get("browser_mode", "installed")
+        browser_mode = self.settings.get("browser_mode", "automation")
         if browser_mode == "guest":
             self.guest_profile_radio.setChecked(True)
         elif browser_mode == "custom":
             self.custom_profile_radio.setChecked(True)
-        else:
+        elif browser_mode == "installed":
             self.installed_profile_radio.setChecked(True)
+        else:
+            self.automation_profile_radio.setChecked(True)
         self.custom_profile_edit.setText(self.settings.get("custom_profile_path", ""))
         self.headless_checkbox.setChecked(bool(self.settings.get("headless", False)))
         self.price_spin.setValue(int(self.settings.get("price_value", DEFAULT_PRICE)))
         price_mode = self.settings.get("price_mode", "free")
-        if price_mode not in {"free", "paid", "auto_free"}:
-            price_mode = "free"
-        self.free_radio.setChecked(price_mode == "free")
-        self.auto_free_radio.setChecked(price_mode == "auto_free")
-        self.sell_radio.setChecked(price_mode == "paid")
+        self.set_price_mode(price_mode)
         publish_mode = self.settings.get("publish_mode", "published")
-        if publish_mode not in {"draft", "published", "scheduled"}:
-            publish_mode = "published"
-        self.draft_radio.setChecked(publish_mode == "draft")
-        self.publish_radio.setChecked(publish_mode == "published")
-        self.schedule_radio.setChecked(publish_mode == "scheduled")
+        self.set_publish_mode_ui(publish_mode)
         self.start_date_edit.setDate(QDate.fromString(schedule_date_text, "yyyy-MM-dd"))
         self.start_time_edit.setTime(QTime.fromString(self.settings.get("schedule_time", "17:00"), "HH:mm"))
         self.chapters_per_day_spin.setValue(int(self.settings.get("chapters_per_day", 5)))
@@ -1872,10 +2162,55 @@ class UploaderGUI(QWidget):
         self.free_rule_combo.setCurrentText(self.settings.get("free_rule", self.free_rule_combo.currentText()))
         self.custom_free_input.setText(self.settings.get("custom_free_input", ""))
         self.work_url_edit.setText(self.settings.get("work_url", ""))
+        task_data = self.settings.get("tasks", [])
+        parsed_tasks = []
+        if isinstance(task_data, list):
+            for item in task_data:
+                if not isinstance(item, dict):
+                    continue
+                parsed_tasks.append(
+                    NovelTask(
+                        title_keyword=item.get("title_keyword", ""),
+                        working_url_override=item.get("working_url_override", ""),
+                        chapter_files=sort_file_paths(list(item.get("chapter_files", []))),
+                        run_mode=item.get("run_mode", self.settings.get("run_mode", "fast")),
+                        headless=bool(item.get("headless", self.settings.get("headless", False))),
+                        sequence_policy=item.get("sequence_policy", "auto_fix"),
+                        price_mode=item.get("price_mode", "free"),
+                        price_value=int(item.get("price_value", DEFAULT_PRICE)),
+                        publish_mode=item.get("publish_mode", "published"),
+                        schedule=item.get("schedule", {}),
+                        auto_free_details=item.get("auto_free_details") or {},
+                        status=item.get("status", "pending"),
+                        last_error=item.get("last_error", ""),
+                    )
+                )
+        if parsed_tasks:
+            self.tasks = parsed_tasks
+        else:
+            fallback_task = self.create_empty_task()
+            fallback_task.title_keyword = self.novel_combo.currentText().strip() if self.novel_combo.currentText().strip() != "-- เลือกหรือพิมพ์ชื่อเรื่อง --" else ""
+            fallback_task.working_url_override = self.work_url_edit.text().strip()
+            fallback_task.chapter_files = sort_file_paths(list(self.file_paths))
+            fallback_task.run_mode = "cloudflare" if self.cloudflare_mode_radio.isChecked() else "fast"
+            fallback_task.headless = self.headless_checkbox.isChecked()
+            fallback_task.sequence_policy = "stop" if self.sequence_stop_radio.isChecked() else "auto_fix"
+            fallback_task.price_mode = self.get_price_mode()
+            fallback_task.price_value = self.price_spin.value()
+            fallback_task.publish_mode = self.get_publish_mode()
+            fallback_task.schedule = self.collect_schedule()
+            fallback_task.auto_free_details = {
+                "rule": self.free_rule_combo.currentText(),
+                "custom_numbers": self.custom_free_input.text().strip(),
+                "free_chapters_list": self.get_free_chapters_list(len(self.file_paths)),
+            }
+            self.tasks = [fallback_task]
+        self.current_task_index = 0
         self.toggle_profile_mode()
         self.toggle_auto_free_options(self.auto_free_radio.isChecked())
 
     def save_settings(self):
+        self.save_current_task_from_form()
         data = {
             "last_novel_folder_path": self.last_novel_folder_path,
             "last_novel_list_path": self.last_novel_list_path,
@@ -1885,7 +2220,7 @@ class UploaderGUI(QWidget):
             "selected_profile_label": self.profile_combo.currentText().strip(),
             "custom_profile_path": self.custom_profile_edit.text().strip(),
             "headless": self.headless_checkbox.isChecked(),
-            "price_mode": "auto_free" if self.auto_free_radio.isChecked() else ("free" if self.free_radio.isChecked() else "paid"),
+            "price_mode": self.get_price_mode(),
             "price_value": self.price_spin.value(),
             "publish_mode": self.get_publish_mode(),
             "schedule_date": self.start_date_edit.date().toString("yyyy-MM-dd"),
@@ -1900,10 +2235,29 @@ class UploaderGUI(QWidget):
             "free_rule": self.free_rule_combo.currentText(),
             "custom_free_input": self.custom_free_input.text().strip(),
             "work_url": self.work_url_edit.text().strip(),
+            "tasks": [
+                {
+                    "title_keyword": task.title_keyword,
+                    "working_url_override": task.working_url_override,
+                    "chapter_files": list(task.chapter_files),
+                    "run_mode": task.run_mode,
+                    "headless": task.headless,
+                    "sequence_policy": task.sequence_policy,
+                    "price_mode": task.price_mode,
+                    "price_value": task.price_value,
+                    "publish_mode": task.publish_mode,
+                    "schedule": task.schedule,
+                    "auto_free_details": task.auto_free_details or {},
+                    "status": task.status,
+                    "last_error": task.last_error,
+                }
+                for task in self.tasks
+            ],
         }
         write_json(QT_SETTINGS_FILE, data)
 
     def closeEvent(self, event):
+        self.save_current_task_from_form()
         self.save_settings()
         self.close_login_browser()
         event.accept()
@@ -1917,6 +2271,153 @@ class UploaderGUI(QWidget):
     def update_status(self, message):
         self.status_label.setText(message)
         print(message)
+
+    def create_empty_task(self):
+        return NovelTask(
+            schedule={
+                "start_date": QDate.currentDate().toString("yyyy-MM-dd"),
+                "start_time": "17:00",
+                "chapters_per_day": 5,
+                "limit_per_day_enabled": True,
+                "interval_minutes": 10,
+                "skip_enabled": False,
+                "skip_start": "00:00",
+                "skip_end": "06:00",
+            },
+            auto_free_details={
+                "rule": "ตอนที่ลงท้ายด้วย 5, 0 (เช่น 5, 10, 15, 20...)",
+                "custom_numbers": "",
+                "free_chapters_list": [],
+            },
+        )
+
+    def ensure_task_exists(self):
+        if not self.tasks:
+            self.tasks = [self.create_empty_task()]
+            self.current_task_index = 0
+
+    def refresh_task_list_widget(self, selected_row=None):
+        current_row = self.current_task_index if selected_row is None else selected_row
+        self.task_list_widget.blockSignals(True)
+        self.task_list_widget.clear()
+        for index, task in enumerate(self.tasks):
+            label = f"{index + 1}. {task.display_name()}"
+            item = QListWidgetItem(label)
+            status = (task.status or "pending").strip()
+            if status == "done":
+                item.setText(f"✅ {label}")
+            elif status == "failed":
+                item.setText(f"❌ {label}")
+            elif status == "running":
+                item.setText(f"⏳ {label}")
+            self.task_list_widget.addItem(item)
+        if self.tasks:
+            if current_row < 0 or current_row >= len(self.tasks):
+                current_row = 0
+            self.task_list_widget.setCurrentRow(current_row)
+            self.current_task_index = current_row
+        self.task_list_widget.blockSignals(False)
+        self.task_count_label.setText(f"ทั้งหมด {len(self.tasks)} งาน")
+
+    def load_task_into_form(self, task: NovelTask):
+        self._initializing = True
+        try:
+            self.file_paths = list(task.chapter_files or [])
+            self.novel_combo.setCurrentText(task.title_keyword or "")
+            self.work_url_edit.setText(task.working_url_override or "")
+            self.cloudflare_mode_radio.setChecked((task.run_mode or "fast") == "cloudflare")
+            self.fast_mode_radio.setChecked((task.run_mode or "fast") != "cloudflare")
+            self.headless_checkbox.setChecked(bool(task.headless))
+            self.sequence_stop_radio.setChecked((task.sequence_policy or "auto_fix") == "stop")
+            self.sequence_auto_fix_radio.setChecked((task.sequence_policy or "auto_fix") != "stop")
+            price_mode = task.price_mode or "free"
+            self.set_price_mode(price_mode)
+            self.price_spin.setValue(int(task.price_value or DEFAULT_PRICE))
+            publish_mode = task.publish_mode or "published"
+            self.set_publish_mode_ui(publish_mode)
+            schedule = task.schedule or {}
+            start_date = schedule.get("start_date") or QDate.currentDate().toString("yyyy-MM-dd")
+            self.start_date_edit.setDate(QDate.fromString(start_date, "yyyy-MM-dd"))
+            self.start_time_edit.setTime(QTime.fromString(schedule.get("start_time", "17:00"), "HH:mm"))
+            self.chapters_per_day_spin.setValue(int(schedule.get("chapters_per_day", 5)))
+            self.check_duplicate_same_day.setChecked(bool(schedule.get("limit_per_day_enabled", True)))
+            interval_minutes = int(schedule.get("interval_minutes", 10))
+            if interval_minutes % 60 == 0 and interval_minutes >= 60:
+                self.interval_unit_hours.setChecked(True)
+                self.interval_value_spin.setValue(max(1, interval_minutes // 60))
+            else:
+                self.interval_unit_minutes.setChecked(True)
+                self.interval_value_spin.setValue(max(1, interval_minutes))
+            self.time_filter_checkbox.setChecked(bool(schedule.get("skip_enabled", False)))
+            self.skip_start_time_edit.setTime(QTime.fromString(schedule.get("skip_start", "00:00"), "HH:mm"))
+            self.skip_end_time_edit.setTime(QTime.fromString(schedule.get("skip_end", "06:00"), "HH:mm"))
+            auto_free = task.auto_free_details or {}
+            if auto_free.get("rule"):
+                self.free_rule_combo.setCurrentText(auto_free.get("rule"))
+            self.custom_free_input.setText(auto_free.get("custom_numbers", ""))
+            self.toggle_time_filter_options(self.time_filter_checkbox.checkState().value)
+            self.update_file_label()
+        finally:
+            self._initializing = False
+
+    def save_current_task_from_form(self, refresh=True):
+        if self._initializing or self.current_task_index < 0 or self.current_task_index >= len(self.tasks):
+            return
+        task = self.tasks[self.current_task_index]
+        task.title_keyword = self.novel_combo.currentText().strip()
+        if task.title_keyword == "-- เลือกหรือพิมพ์ชื่อเรื่อง --":
+            task.title_keyword = ""
+        task.working_url_override = self.work_url_edit.text().strip()
+        task.chapter_files = sort_file_paths(list(self.file_paths))
+        task.run_mode = "cloudflare" if self.cloudflare_mode_radio.isChecked() else "fast"
+        task.headless = self.headless_checkbox.isChecked()
+        task.sequence_policy = "stop" if self.sequence_stop_radio.isChecked() else "auto_fix"
+        task.price_mode = self.get_price_mode()
+        task.price_value = self.price_spin.value()
+        task.publish_mode = self.get_publish_mode()
+        task.schedule = self.collect_schedule()
+        task.auto_free_details = {
+            "rule": self.free_rule_combo.currentText(),
+            "custom_numbers": self.custom_free_input.text().strip(),
+            "free_chapters_list": self.get_free_chapters_list(len(task.chapter_files)),
+        }
+        if refresh:
+            self.refresh_task_list_widget(selected_row=self.current_task_index)
+
+    def on_task_selected(self, index):
+        if self._initializing:
+            return
+        previous_index = self.current_task_index
+        if previous_index >= 0 and previous_index < len(self.tasks):
+            self.save_current_task_from_form(refresh=False)
+        if index < 0 or index >= len(self.tasks):
+            return
+        self.current_task_index = index
+        self.load_task_into_form(self.tasks[index])
+        self.refresh_task_list_widget(selected_row=index)
+
+    def add_task(self):
+        if self.current_task_index >= 0:
+            self.save_current_task_from_form(refresh=False)
+        self.tasks.append(self.create_empty_task())
+        self.current_task_index = len(self.tasks) - 1
+        self.refresh_task_list_widget(selected_row=self.current_task_index)
+        self.load_task_into_form(self.tasks[self.current_task_index])
+
+    def remove_selected_task(self):
+        if not self.tasks:
+            return
+        row = self.task_list_widget.currentRow()
+        if row < 0:
+            row = self.current_task_index if self.current_task_index >= 0 else 0
+        if len(self.tasks) == 1:
+            self.tasks = [self.create_empty_task()]
+            self.current_task_index = 0
+        else:
+            self.tasks.pop(row)
+            self.current_task_index = max(0, min(row, len(self.tasks) - 1))
+        self.refresh_task_list_widget(selected_row=self.current_task_index)
+        self.load_task_into_form(self.tasks[self.current_task_index])
 
     def load_novel_list_from_file(self):
         default_dir = self.last_novel_list_path if self.last_novel_list_path else ""
@@ -1985,6 +2486,7 @@ class UploaderGUI(QWidget):
             self.file_paths = sort_file_paths(paths)
             self.last_novel_folder_path = os.path.dirname(paths[0])
             self.update_file_label()
+            self.save_current_task_from_form()
             self.save_settings()
 
     def update_file_label(self):
@@ -2011,7 +2513,31 @@ class UploaderGUI(QWidget):
         self.profile_combo.setEnabled(installed)
         self.custom_profile_edit.setEnabled(custom)
 
+    def get_price_mode(self):
+        if self.auto_free_radio.isChecked():
+            return "auto_free"
+        if self.sell_radio.isChecked():
+            return "paid"
+        return "free"
+
+    def set_price_mode(self, price_mode: str):
+        mode = price_mode if price_mode in {"free", "paid", "auto_free"} else "free"
+        self.free_radio.setChecked(mode == "free")
+        self.sell_radio.setChecked(mode == "paid")
+        self.auto_free_radio.setChecked(mode == "auto_free")
+        self.toggle_auto_free_options(mode == "auto_free")
+
+    def set_publish_mode_ui(self, publish_mode: str):
+        mode = publish_mode if publish_mode in {"draft", "published", "scheduled"} else "published"
+        self.draft_radio.setChecked(mode == "draft")
+        self.publish_radio.setChecked(mode == "published")
+        self.schedule_radio.setChecked(mode == "scheduled")
+        self.toggle_schedule_options(mode == "scheduled")
+        self.toggle_time_filter_group(mode == "scheduled")
+
     def get_browser_mode(self):
+        if self.automation_profile_radio.isChecked():
+            return "automation"
         if self.guest_profile_radio.isChecked():
             return "guest"
         if self.custom_profile_radio.isChecked():
@@ -2114,6 +2640,7 @@ class UploaderGUI(QWidget):
             "start_date": self.start_date_edit.date().toString("yyyy-MM-dd"),
             "start_time": self.start_time_edit.time().toString("HH:mm"),
             "chapters_per_day": self.chapters_per_day_spin.value(),
+            "limit_per_day_enabled": self.check_duplicate_same_day.isChecked(),
             "interval_minutes": interval_minutes,
             "skip_enabled": self.time_filter_checkbox.isChecked(),
             "skip_start": self.skip_start_time_edit.time().toString("HH:mm"),
@@ -2122,6 +2649,8 @@ class UploaderGUI(QWidget):
 
     def resolve_profile(self):
         mode = self.get_browser_mode()
+        if mode == "automation":
+            return build_automation_profile()
         if mode == "guest":
             return build_guest_profile()
         if mode == "custom":
@@ -2134,47 +2663,69 @@ class UploaderGUI(QWidget):
             raise RuntimeError("กรุณาเลือก Chrome profile")
         return self.profile_map[label]
 
-    def build_job(self, allow_empty_novel=False):
-        if not self.file_paths:
-            raise RuntimeError("กรุณาเลือกไฟล์นิยายก่อน")
-        novel_keyword = self.novel_combo.currentText().strip()
-        work_url = self.work_url_edit.text().strip()
+    def build_job_from_task(self, task: NovelTask, allow_empty_novel=False):
+        chapter_files = sort_file_paths(list(task.chapter_files or []))
+        if not chapter_files:
+            raise RuntimeError(f"งาน '{task.display_name()}' ยังไม่ได้เลือกไฟล์นิยาย")
+        novel_keyword = (task.title_keyword or "").strip()
+        work_url = (task.working_url_override or "").strip()
         if (not novel_keyword or novel_keyword == "-- เลือกหรือพิมพ์ชื่อเรื่อง --") and not allow_empty_novel and not work_url:
             raise RuntimeError("กรุณาระบุชื่อนิยายสำหรับค้นหา")
         if novel_keyword == "-- เลือกหรือพิมพ์ชื่อเรื่อง --":
             novel_keyword = ""
         profile = self.resolve_profile()
-        publish_mode = self.get_publish_mode()
-        schedule = self.collect_schedule()
+        publish_mode = task.publish_mode or "published"
+        schedule = task.schedule or self.collect_schedule()
         if publish_mode == "scheduled":
-            compute_schedule_datetimes(len(self.file_paths), ScheduleConfig(**schedule))
-        price_mode = "auto_free" if self.auto_free_radio.isChecked() else ("free" if self.free_radio.isChecked() else "paid")
+            compute_schedule_datetimes(len(chapter_files), ScheduleConfig(**schedule))
+        price_mode = task.price_mode or "free"
         auto_free_details = None
         if price_mode == "auto_free":
-            auto_free_details = {
-                "rule": self.free_rule_combo.currentText(),
-                "custom_numbers": self.custom_free_input.text().strip(),
-                "free_chapters_list": self.get_free_chapters_list(len(self.file_paths)),
-            }
+            auto_free_details = dict(task.auto_free_details or {})
+            auto_free_details.setdefault("rule", self.free_rule_combo.currentText())
+            auto_free_details.setdefault("custom_numbers", "")
+            auto_free_details["free_chapters_list"] = auto_free_details.get("free_chapters_list") or self.get_free_chapters_list(len(chapter_files))
         job = UploadJob(
             preset_name="",
             novel_keyword=novel_keyword,
-            chapter_files=self.file_paths,
+            chapter_files=chapter_files,
             browser_mode=self.get_browser_mode(),
-            selected_profile_label=profile.label if self.get_browser_mode() == "installed" else self.profile_combo.currentText().strip(),
+            selected_profile_label=profile.label if self.get_browser_mode() in {"installed", "automation"} else self.profile_combo.currentText().strip(),
             custom_profile_path=self.custom_profile_edit.text().strip(),
             chrome_path=self.chrome_path_edit.text().strip(),
-            headless=self.headless_checkbox.isChecked(),
+            headless=bool(task.headless),
             price_mode=price_mode,
-            price_value=self.price_spin.value(),
+            price_value=int(task.price_value or DEFAULT_PRICE),
             publish_mode=publish_mode,
             schedule=schedule,
             reset_progress=False,
-            run_mode="cloudflare" if self.cloudflare_mode_radio.isChecked() else "fast",
+            run_mode=task.run_mode or "fast",
+            sequence_policy=task.sequence_policy or "auto_fix",
             auto_free_details=auto_free_details,
         )
         setattr(job, "working_url_override", work_url)
         return job
+
+    def build_jobs(self, allow_empty_novel=False):
+        self.save_current_task_from_form()
+        jobs = []
+        valid_tasks = []
+        for task in self.tasks:
+            if not (task.title_keyword or task.working_url_override or task.chapter_files):
+                continue
+            valid_tasks.append(task)
+        if not valid_tasks:
+            raise RuntimeError("กรุณาเพิ่มนิยายอย่างน้อย 1 งาน")
+        for task in valid_tasks:
+            jobs.append(self.build_job_from_task(task, allow_empty_novel=allow_empty_novel))
+        return jobs
+
+    def build_current_task_job(self, allow_empty_novel=False):
+        self.save_current_task_from_form()
+        if self.current_task_index < 0 or self.current_task_index >= len(self.tasks):
+            raise RuntimeError("กรุณาเลือกงานนิยายก่อน")
+        task = self.tasks[self.current_task_index]
+        return self.build_job_from_task(task, allow_empty_novel=allow_empty_novel)
 
     def show_estimate_dialog(self):
         if not self.schedule_radio.isChecked():
@@ -2206,10 +2757,33 @@ class UploaderGUI(QWidget):
             chrome_path = self.chrome_path_edit.text().strip()
             self.close_login_browser()
             self.login_bot = MyNovelBot(self.update_status)
-            self.login_driver = self.login_bot.open_login_browser(chrome_path, profile)
-            QMessageBox.information(self, "Login", "เปิดหน้า Login แล้ว กรุณาล็อกอินบนเบราว์เซอร์ จากนั้นค่อยกดเริ่มอัปโหลด")
+            self.login_driver = self.login_bot.open_login_browser(chrome_path, profile, persistent_profile=self.get_browser_mode() == "automation")
+            QMessageBox.information(
+                self,
+                "Login",
+                "เปิดหน้า Login แล้ว\n\n"
+                "ล็อกอินให้เสร็จเพียงครั้งเดียว แล้วค่อยกลับมากดเริ่มอัปโหลด\n"
+                "ถ้ายังไม่ปิดหน้าต่างนี้ โปรแกรมจะ reuse session นี้ต่อทันที"
+            )
         except Exception as error:
             QMessageBox.critical(self, "เปิดหน้า Login ไม่สำเร็จ", str(error))
+
+    def ensure_login_browser(self, profile):
+        if self.login_driver is not None:
+            try:
+                _ = self.login_driver.current_url
+                return self.login_driver
+            except Exception:
+                self.close_login_browser()
+
+        chrome_path = self.chrome_path_edit.text().strip()
+        self.login_bot = MyNovelBot(self.update_status)
+        self.login_driver = self.login_bot.open_login_browser(
+            chrome_path,
+            profile,
+            persistent_profile=self.get_browser_mode() == "automation",
+        )
+        return self.login_driver
 
     def close_login_browser(self):
         if self.login_driver:
@@ -2226,68 +2800,77 @@ class UploaderGUI(QWidget):
 
     def set_busy(self, busy):
         self.start_button.setEnabled(not busy)
+        self.run_current_button.setEnabled(not busy)
+        self.parallel_button.setEnabled(not busy)
         self.calc_button.setEnabled((not busy) and self.schedule_radio.isChecked())
         self.login_button.setEnabled(not busy)
         self.close_login_button.setEnabled(not busy)
+        self.add_task_button.setEnabled(not busy)
+        self.remove_task_button.setEnabled(not busy)
+        self.task_list_widget.setEnabled(not busy)
 
-    def apply_settings(self):
-        if not self.file_paths:
-            QMessageBox.critical(self, "ข้อผิดพลาด", "กรุณาเลือกไฟล์นิยายก่อน")
-            return
-        novel_name = self.novel_combo.currentText().strip()
-        allow_empty_novel = False
-        if not novel_name or novel_name == "-- เลือกหรือพิมพ์ชื่อเรื่อง --":
+    def confirm_allow_empty_novel(self, task_indices):
+        for index in task_indices:
+            if index < 0 or index >= len(self.tasks):
+                continue
+            task = self.tasks[index]
+            novel_name = (task.title_keyword or "").strip()
+            work_url = (task.working_url_override or "").strip()
+            if novel_name and novel_name != "-- เลือกหรือพิมพ์ชื่อเรื่อง --":
+                continue
+            if work_url:
+                continue
             reply = QMessageBox.question(
                 self,
                 "ยืนยัน",
-                "ไม่ได้เลือกชื่อเรื่อง ต้องการดำเนินการต่อหรือไม่?\n(โปรแกรมอาจหานิยายไม่เจอ)",
+                f"งาน '{task.display_name()}' ไม่ได้เลือกชื่อเรื่อง ต้องการดำเนินการต่อหรือไม่?\n(โปรแกรมอาจหานิยายไม่เจอ)",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-            if reply == QMessageBox.StandardButton.No:
-                return
-            allow_empty_novel = True
-        
-        reply = QMessageBox.question(
-            self,
-            "ยืนยันการอัปโหลด",
-            "กรุณาล็อกอิน MyNovel ในหน้าต่าง Chrome ที่จะเปิดขึ้น\n\n"
-            "หลังจากล็อกอินเสร็จแล้ว กรุณากด OK เพื่อเริ่มอัปโหลด\n\n"
-            "⚠️ อย่าปิดหน้าต่าง Chrome จนกว่าจะอัปโหลดเสร็จ",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-        )
-        if reply == QMessageBox.StandardButton.Cancel:
-            return
-        
+            return reply == QMessageBox.StandardButton.Yes
+        return False
+
+    def start_jobs(self, jobs, task_indices):
         try:
-            job = self.build_job(allow_empty_novel=allow_empty_novel)
             profile = self.resolve_profile()
+            self.running_task_indices = list(task_indices)
+            for index, task in enumerate(self.tasks):
+                if not (task.chapter_files or task.title_keyword or task.working_url_override):
+                    continue
+                if index in self.running_task_indices:
+                    task.status = "pending"
+                    task.last_error = ""
             self.save_settings()
+            self.refresh_task_list_widget(selected_row=self.current_task_index)
         except Exception as error:
             QMessageBox.critical(self, "ข้อผิดพลาด", str(error))
             return
-        
+
         try:
-            chrome_path = self.chrome_path_edit.text().strip()
-            self.close_login_browser()
-            self.login_bot = MyNovelBot(self.update_status)
-            self.login_driver = self.login_bot.open_login_browser(chrome_path, profile)
-            QMessageBox.information(
-                self,
-                "Login",
-                "กรุณาล็อกอิน MyNovel ในหน้าต่าง Chrome\n\n"
-                "หลังจากล็อกอินเสร็จแล้ว กรุณากด OK เพื่อเริ่มอัปโหลด"
-            )
+            reused_existing = self.login_driver is not None
+            driver = self.ensure_login_browser(profile)
+            if not reused_existing:
+                QMessageBox.information(
+                    self,
+                    "Login",
+                    "ยังไม่มีหน้าต่าง Login ที่เปิดอยู่\n\n"
+                    "กรุณาล็อกอิน MyNovel ในหน้าต่าง Chrome ที่เปิดขึ้นมา\n"
+                    "หลังจากล็อกอินเสร็จแล้ว กด OK เพื่อเริ่มอัปโหลด"
+                )
+            else:
+                self.update_status("ใช้ session Login ที่เปิดค้างไว้อยู่แล้ว")
         except Exception as error:
+            self.running_task_indices = []
             QMessageBox.critical(self, "เปิดหน้า Login ไม่สำเร็จ", str(error))
             return
         try:
-            self.login_driver.get("https://mynovel.co/dashboard/workings")
+            driver.get("https://mynovel.co/dashboard/workings")
         except Exception as error:
+            self.running_task_indices = []
             QMessageBox.critical(self, "เปลี่ยนหน้าไม่สำเร็จ", str(error))
             return
 
         self.thread = QThread(self)
-        self.worker = UploadWorker(job, profile, existing_driver=self.login_driver)
+        self.worker = UploadWorker(jobs, profile, existing_driver=driver)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.status.connect(self.update_status)
@@ -2296,11 +2879,183 @@ class UploaderGUI(QWidget):
         self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
         self.set_busy(True)
-        self.update_status("เริ่มอัปโหลด...")
+        if len(jobs) == 1:
+            self.update_status("เริ่มอัปโหลดเรื่องที่เลือก...")
+        else:
+            self.update_status("เริ่มอัปโหลดหลายเรื่อง...")
         self.thread.start()
+
+    def start_parallel_jobs(self, jobs, task_indices):
+        try:
+            profile = self.resolve_profile()
+            self.running_task_indices = list(task_indices)
+            self.parallel_threads = []
+            self.parallel_workers = []
+            self.parallel_results = {}
+            self.parallel_pending_count = len(jobs)
+            for index, task in enumerate(self.tasks):
+                if not (task.chapter_files or task.title_keyword or task.working_url_override):
+                    continue
+                if index in self.running_task_indices:
+                    task.status = "running"
+                    task.last_error = ""
+            self.save_settings()
+            self.refresh_task_list_widget(selected_row=self.current_task_index)
+        except Exception as error:
+            QMessageBox.critical(self, "ข้อผิดพลาด", str(error))
+            return
+
+        self.set_busy(True)
+        self.update_status(f"เริ่มอัปโหลดพร้อมกัน {len(jobs)} เรื่อง...")
+
+        for job, task_index in zip(jobs, task_indices):
+            thread = QThread(self)
+            worker = UploadWorker(job, profile)
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.status.connect(lambda message, idx=task_index: self.update_status(f"[งาน {idx + 1}] {message}"))
+            worker.finished.connect(lambda success, message, idx=task_index: self.on_parallel_worker_finished(idx, success, message))
+            worker.finished.connect(thread.quit)
+            worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            self.parallel_threads.append(thread)
+            self.parallel_workers.append(worker)
+
+        for thread in self.parallel_threads:
+            thread.start()
+
+    def on_parallel_worker_finished(self, task_index, success, message):
+        self.parallel_results[task_index] = (success, message)
+        if 0 <= task_index < len(self.tasks):
+            task = self.tasks[task_index]
+            task.status = "done" if success else "failed"
+            task.last_error = "" if success else message
+        self.parallel_pending_count = max(0, self.parallel_pending_count - 1)
+        self.refresh_task_list_widget(selected_row=self.current_task_index)
+        self.save_settings()
+
+        if self.parallel_pending_count > 0:
+            return
+
+        self.set_busy(False)
+        self.running_task_indices = []
+        failures = [(index, result[1]) for index, result in self.parallel_results.items() if not result[0]]
+        self.parallel_threads = []
+        self.parallel_workers = []
+        if failures:
+            summary = "\n".join(f"งาน {index + 1}: {message}" for index, message in failures)
+            self.update_status("มีบางงานอัปโหลดไม่สำเร็จ")
+            QMessageBox.critical(self, "อัปโหลดพร้อมกันไม่สมบูรณ์", summary)
+        else:
+            self.update_status("อัปโหลดพร้อมกันเสร็จสิ้น")
+            QMessageBox.information(self, "สำเร็จ", "อัปโหลดพร้อมกันเสร็จสิ้น")
+
+    def apply_current_task(self):
+        self.save_current_task_from_form(refresh=False)
+        if self.current_task_index < 0 or self.current_task_index >= len(self.tasks):
+            QMessageBox.critical(self, "ข้อผิดพลาด", "กรุณาเลือกงานนิยายก่อน")
+            return
+        task = self.tasks[self.current_task_index]
+        if not task.chapter_files:
+            QMessageBox.critical(self, "ข้อผิดพลาด", "กรุณาเลือกไฟล์นิยายของเรื่องนี้ก่อน")
+            return
+        allow_empty_novel = self.confirm_allow_empty_novel([self.current_task_index])
+        if not allow_empty_novel and not ((task.title_keyword or "").strip() or (task.working_url_override or "").strip()):
+            return
+        reply = QMessageBox.question(
+            self,
+            "ยืนยันการอัปโหลด",
+            f"ต้องการรันเฉพาะเรื่อง '{task.display_name()}' ใช่หรือไม่?\n\n"
+            "หากมีหน้าต่าง Login ค้างอยู่ โปรแกรมจะใช้ session นั้นต่อทันที",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+        try:
+            job = self.build_current_task_job(allow_empty_novel=allow_empty_novel)
+        except Exception as error:
+            QMessageBox.critical(self, "ข้อผิดพลาด", str(error))
+            return
+        self.start_jobs([job], [self.current_task_index])
+
+    def apply_settings(self):
+        self.save_current_task_from_form()
+        populated_tasks = [task for task in self.tasks if task.chapter_files or task.title_keyword or task.working_url_override]
+        if not populated_tasks:
+            QMessageBox.critical(self, "ข้อผิดพลาด", "กรุณาเพิ่มนิยายและเลือกไฟล์อย่างน้อย 1 งาน")
+            return
+        task_indices = [index for index, task in enumerate(self.tasks) if task.chapter_files or task.title_keyword or task.working_url_override]
+        allow_empty_novel = self.confirm_allow_empty_novel(task_indices)
+        if not allow_empty_novel:
+            for index in task_indices:
+                task = self.tasks[index]
+                if not ((task.title_keyword or "").strip() or (task.working_url_override or "").strip()):
+                    return
+        
+        reply = QMessageBox.question(
+            self,
+            "ยืนยันการอัปโหลด",
+            "ต้องการรันทุกเรื่องในรายการใช่หรือไม่?\n\n"
+            "หากมีหน้าต่าง Login ค้างอยู่ โปรแกรมจะใช้ session นั้นต่อทันที\n"
+            "⚠️ อย่าปิดหน้าต่าง Chrome จนกว่าจะอัปโหลดเสร็จ",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+        
+        try:
+            jobs = self.build_jobs(allow_empty_novel=allow_empty_novel)
+        except Exception as error:
+            QMessageBox.critical(self, "ข้อผิดพลาด", str(error))
+            return
+        self.start_jobs(jobs, task_indices)
+
+    def apply_parallel_settings(self):
+        self.save_current_task_from_form()
+        populated_tasks = [task for task in self.tasks if task.chapter_files or task.title_keyword or task.working_url_override]
+        if len(populated_tasks) < 2:
+            QMessageBox.critical(self, "ข้อผิดพลาด", "โหมดรันพร้อมกันต้องมีอย่างน้อย 2 งาน")
+            return
+        if self.get_browser_mode() == "guest":
+            QMessageBox.critical(self, "ข้อผิดพลาด", "Guest Mode ไม่เหมาะกับการรันพร้อมกัน เพราะไม่สามารถแชร์ session login ให้หลาย browser ได้")
+            return
+        task_indices = [index for index, task in enumerate(self.tasks) if task.chapter_files or task.title_keyword or task.working_url_override]
+        allow_empty_novel = self.confirm_allow_empty_novel(task_indices)
+        if not allow_empty_novel:
+            for index in task_indices:
+                task = self.tasks[index]
+                if not ((task.title_keyword or "").strip() or (task.working_url_override or "").strip()):
+                    return
+        reply = QMessageBox.question(
+            self,
+            "ยืนยันการรันพร้อมกัน",
+            "ต้องการเปิด browser แยกและรันทุกเรื่องพร้อมกันใช่หรือไม่?\n\n"
+            "แนะนำให้ใช้ Automation Profile หรือ profile ที่ล็อกอินไว้แล้ว\n"
+            "แต่ละงานจะเปิด browser ของตัวเอง",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+        try:
+            jobs = self.build_jobs(allow_empty_novel=allow_empty_novel)
+        except Exception as error:
+            QMessageBox.critical(self, "ข้อผิดพลาด", str(error))
+            return
+        self.start_parallel_jobs(jobs, task_indices)
 
     def on_upload_finished(self, success, message):
         self.set_busy(False)
+        target_indices = self.running_task_indices or [index for index, task in enumerate(self.tasks) if task.chapter_files or task.title_keyword or task.working_url_override]
+        for index in target_indices:
+            if index < 0 or index >= len(self.tasks):
+                continue
+            task = self.tasks[index]
+            if task.chapter_files or task.title_keyword or task.working_url_override:
+                task.status = "done" if success else "failed"
+                task.last_error = "" if success else message
+        self.running_task_indices = []
+        self.refresh_task_list_widget()
+        self.save_settings()
         if success:
             self.update_status(message)
             QMessageBox.information(self, "สำเร็จ", message)
