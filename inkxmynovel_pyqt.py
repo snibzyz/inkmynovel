@@ -69,6 +69,7 @@ class NovelTask:
     auto_free_details: Optional[Dict[str, Any]] = None
     status: str = "pending"
     last_error: str = ""
+    selected: bool = False
 
     def display_name(self):
         text = (self.title_keyword or "").strip() or (self.working_url_override or "").strip()
@@ -1133,7 +1134,12 @@ class MyNovelBot:
             self.scroll_modal_element_into_view(driver, section)
         except Exception:
             pass
-        self.select_radio_value(driver, section, target_value, "ตั้งค่าสถานะเผยแพร่")
+        try:
+            self.select_radio_value(driver, section, target_value, "ตั้งค่าสถานะเผยแพร่")
+        except Exception:
+            fallback_keywords = ["ไม่เผยแพร่", "เผยแพร่ทันที", "ตั้งเวลา"] if target_value == "draft" else ["เผยแพร่ทันที", "ตั้งเวลา"] if target_value == "published" else ["ตั้งเวลา"]
+            if not self.click_choice_by_keywords(driver, section, fallback_keywords):
+                raise
         if target_value == "scheduled":
             self.set_schedule_datetime(driver, wait, schedule_dt)
             return
@@ -1298,9 +1304,9 @@ class MyNovelBot:
                 WebDriverWait(driver, 6).until(lambda d: self.find_visible_episode_dialog(d) is None)
                 self.log_debug(driver, "กดสร้างตอนสำเร็จและฟอร์มปิดแล้ว")
                 break
-            except Exception as error:
-                last_error = error
-                self.log_debug(driver, f"กดสร้างตอนไม่สำเร็จ ครั้งที่ {attempt + 1}: {type(error).__name__}: {error}")
+            except Exception as submit_error:
+                last_error = submit_error
+                self.log_debug(driver, f"กดสร้างตอนไม่สำเร็จ ครั้งที่ {attempt + 1}: {type(submit_error).__name__}: {submit_error}")
                 time.sleep(0.4)
         else:
             raise RuntimeError(f"กดปุ่มสร้างตอนไม่สำเร็จ: {last_error}")
@@ -1862,26 +1868,24 @@ class UploadWorker(QObject):
         working_url = self.resolve_working_url(bot, driver, wait)
         bot.log(f"พบนิยายแล้ว: {working_url}")
 
-        files = sort_file_paths([path for path in self.job.chapter_files if path.lower().endswith(".txt")])
-        entries = list(enumerate(files))
+        files = list(self.job.chapter_files)
         schedule_plan = []
         if self.job.publish_mode == "scheduled":
-            schedule_plan = compute_schedule_datetimes(len(entries), ScheduleConfig(**self.job.schedule))
+            schedule_plan = compute_schedule_datetimes(len(files), ScheduleConfig(**self.job.schedule))
         sequence_plan = self.verify_episode_sequence_before_run(bot, driver, wait, files)
         previous_latest_row = sequence_plan.get("latest_row")
         uploaded_count = 0
         total_elapsed_seconds = 0.0
         run_started_at = datetime.now()
 
-        for index, (original_index, filename) in enumerate(entries):
-            original_title, body_lines = read_chapter_file(filename)
-            title = self.resolve_upload_title(original_title, filename, index, sequence_plan)
+        for index, (original_index, filename) in enumerate(enumerate(files)):
+            original_title, body = read_chapter_file(filename)
             schedule_dt = schedule_plan[index] if self.job.publish_mode == "scheduled" else None
             current_price_mode = self.job.price_mode
             current_price_value = self.job.price_value
             if self.job.price_mode == "auto_free":
                 auto_free_details = self.job.auto_free_details or {}
-                episode_number_in_title = extract_episode_number_from_text(title) or extract_episode_number_from_text(Path(filename).stem)
+                episode_number_in_title = extract_episode_number_from_text(original_title) or extract_episode_number_from_text(Path(filename).stem)
                 check_index = episode_number_in_title if episode_number_in_title is not None else (original_index + 1)
                 is_free = is_episode_free_by_rule(
                     check_index,
@@ -1893,7 +1897,7 @@ class UploadWorker(QObject):
                     is_free = check_index in free_chapters
                 current_price_mode = "free" if is_free else "paid"
 
-            bot.log(f"เริ่มอัปโหลด ({index + 1}/{len(entries)}): {Path(filename).name}")
+            bot.log(f"เริ่มอัปโหลด ({index + 1}/{len(files)}): {Path(filename).name}")
             if title != original_title:
                 bot.log(f"fallback renumber title: '{original_title}' -> '{title}'")
             if current_price_mode == "paid":
@@ -1928,7 +1932,7 @@ class UploadWorker(QObject):
                 uploaded_count += 1
                 total_elapsed_seconds += elapsed_seconds
                 avg_seconds = total_elapsed_seconds / uploaded_count
-                remaining_count = len(entries) - (index + 1)
+                remaining_count = len(files) - (index + 1)
                 eta_seconds = avg_seconds * remaining_count
                 est_time = datetime.now() + timedelta(seconds=eta_seconds)
                 bot.log(
@@ -1938,7 +1942,7 @@ class UploadWorker(QObject):
                 )
             except Exception:
                 elapsed_seconds = time.perf_counter() - episode_started
-                remaining_count = len(entries) - index
+                remaining_count = len(files) - index
                 avg_seconds = (total_elapsed_seconds / uploaded_count) if uploaded_count else elapsed_seconds
                 eta_seconds = avg_seconds * remaining_count
                 est_time = datetime.now() + timedelta(seconds=eta_seconds)
@@ -2072,6 +2076,7 @@ class UploaderGUI(QWidget):
         self.task_list_widget.setMinimumHeight(180)
         self.task_list_widget.setMinimumWidth(260)
         self.task_list_widget.currentRowChanged.connect(self.on_task_selected)
+        self.task_list_widget.itemChanged.connect(self.on_task_item_changed)
         task_layout.addWidget(self.task_list_widget, 1)
         task_button_layout = QVBoxLayout()
         self.add_task_button = QPushButton("➕ เพิ่มนิยาย")
@@ -2363,14 +2368,23 @@ class UploaderGUI(QWidget):
         self.start_button.setObjectName("StartButton")
         self.start_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOkButton))
         self.start_button.clicked.connect(self.apply_settings)
+        self.enqueue_selected_button = QPushButton("  เพิ่มเข้าคิวที่เลือก")
+        self.enqueue_selected_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
+        self.enqueue_selected_button.clicked.connect(self.enqueue_selected_tasks)
         self.parallel_button = QPushButton("  รันพร้อมกัน")
         self.parallel_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
         self.parallel_button.clicked.connect(self.apply_parallel_settings)
+        self.max_parallel_spin = QSpinBox()
+        self.max_parallel_spin.setRange(1, 20)
+        self.max_parallel_spin.setValue(int(self.settings.get("max_parallel_jobs", 5) or 5))
         self.start_button.setDefault(True)
         button_layout.addStretch(1)
         button_layout.addWidget(cancel_button)
         button_layout.addWidget(self.calc_button)
         button_layout.addWidget(self.run_current_button)
+        button_layout.addWidget(self.enqueue_selected_button)
+        button_layout.addWidget(QLabel("พร้อมกันสูงสุด:"))
+        button_layout.addWidget(self.max_parallel_spin)
         button_layout.addWidget(self.parallel_button)
         button_layout.addWidget(self.start_button)
 
@@ -2456,6 +2470,7 @@ class UploaderGUI(QWidget):
                         publish_mode=item.get("publish_mode", "published"),
                         schedule=item.get("schedule", {}),
                         auto_free_details=item.get("auto_free_details") or {},
+                        selected=bool(item.get("selected", False)),
                         status=item.get("status", "pending"),
                         last_error=item.get("last_error", ""),
                     )
@@ -2523,11 +2538,13 @@ class UploaderGUI(QWidget):
                     "publish_mode": task.publish_mode,
                     "schedule": task.schedule,
                     "auto_free_details": task.auto_free_details or {},
+                    "selected": bool(task.selected),
                     "status": task.status,
                     "last_error": task.last_error,
                 }
                 for task in self.tasks
             ],
+            "max_parallel_jobs": self.max_parallel_spin.value(),
         }
         write_json(QT_SETTINGS_FILE, data)
 
@@ -2585,6 +2602,10 @@ class UploaderGUI(QWidget):
                 item.setText(f"❌ {label}")
             elif status == "running":
                 item.setText(f"⏳ {label}")
+            elif status == "queued":
+                item.setText(f"📌 {label}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if task.selected else Qt.CheckState.Unchecked)
             self.task_list_widget.addItem(item)
         if self.tasks:
             if current_row < 0 or current_row >= len(self.tasks):
@@ -2593,6 +2614,151 @@ class UploaderGUI(QWidget):
             self.current_task_index = current_row
         self.task_list_widget.blockSignals(False)
         self.task_count_label.setText(f"ทั้งหมด {len(self.tasks)} งาน")
+
+    def on_task_item_changed(self, item):
+        if self._initializing:
+            return
+        row = self.task_list_widget.row(item)
+        if row < 0 or row >= len(self.tasks):
+            return
+        self.tasks[row].selected = item.checkState() == Qt.CheckState.Checked
+        self.save_settings()
+
+    def get_selected_task_indices(self):
+        return [index for index, task in enumerate(self.tasks) if getattr(task, "selected", False)]
+
+    def get_populated_task_indices(self, selected_only=False):
+        indices = []
+        for index, task in enumerate(self.tasks):
+            if selected_only and not getattr(task, "selected", False):
+                continue
+            if task.chapter_files or task.title_keyword or task.working_url_override:
+                indices.append(index)
+        return indices
+
+    def can_run_task_in_parallel(self, task: NovelTask):
+        return bool(task.chapter_files) and bool((task.title_keyword or "").strip() or (task.working_url_override or "").strip())
+
+    def mark_tasks_queued(self, task_indices):
+        for index in task_indices:
+            if index < 0 or index >= len(self.tasks):
+                continue
+            task = self.tasks[index]
+            if task.status == "running":
+                continue
+            task.status = "queued"
+            task.last_error = ""
+        self.refresh_task_list_widget(selected_row=self.current_task_index)
+        self.save_settings()
+
+    def build_jobs_for_indices(self, task_indices, allow_empty_novel=False):
+        jobs = []
+        indices = []
+        for index in task_indices:
+            if index < 0 or index >= len(self.tasks):
+                continue
+            task = self.tasks[index]
+            if not (task.chapter_files or task.title_keyword or task.working_url_override):
+                continue
+            jobs.append(self.build_job_from_task(task, allow_empty_novel=allow_empty_novel))
+            indices.append(index)
+        return jobs, indices
+
+    def launch_parallel_job(self, job, task_index):
+        thread = QThread(self)
+        worker = UploadWorker(job, self.parallel_profile)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.status.connect(lambda message, idx=task_index: self.update_status(f"[งาน {idx + 1}] {message}"))
+        worker.finished.connect(lambda success, message, idx=task_index: self.on_parallel_worker_finished(idx, success, message))
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self.parallel_active[task_index] = (thread, worker)
+        self.parallel_threads.append(thread)
+        self.parallel_workers.append(worker)
+        if 0 <= task_index < len(self.tasks):
+            task = self.tasks[task_index]
+            task.status = "running"
+            task.last_error = ""
+        self.refresh_task_list_widget(selected_row=self.current_task_index)
+        self.save_settings()
+        thread.start()
+
+    def process_parallel_queue(self):
+        if not self.parallel_scheduler_running:
+            return
+        max_parallel = max(1, self.max_parallel_spin.value())
+        while self.parallel_queue and len(self.parallel_active) < max_parallel:
+            task_index, job = self.parallel_queue.pop(0)
+            if task_index in self.parallel_active:
+                continue
+            if task_index in self.parallel_results:
+                continue
+            self.launch_parallel_job(job, task_index)
+        pending_total = len(self.parallel_queue) + len(self.parallel_active)
+        self.parallel_pending_count = pending_total
+        if pending_total <= 0:
+            self.finish_parallel_scheduler()
+
+    def finish_parallel_scheduler(self):
+        self.parallel_scheduler_running = False
+        self.set_busy(False)
+        self.running_task_indices = []
+        failures = [(index, result[1]) for index, result in self.parallel_results.items() if not result[0]]
+        self.parallel_threads = []
+        self.parallel_workers = []
+        self.parallel_active = {}
+        self.parallel_queue = []
+        self.parallel_pending_count = 0
+        self.parallel_profile = None
+        if failures:
+            summary = "\n".join(f"งาน {index + 1}: {message}" for index, message in failures)
+            self.update_status("มีบางงานอัปโหลดไม่สำเร็จ")
+            QMessageBox.critical(self, "อัปโหลดพร้อมกันไม่สมบูรณ์", summary)
+        else:
+            self.update_status("อัปโหลดพร้อมกันเสร็จสิ้น")
+            QMessageBox.information(self, "สำเร็จ", "อัปโหลดพร้อมกันเสร็จสิ้น")
+
+    def enqueue_selected_tasks(self):
+        self.save_current_task_from_form(refresh=False)
+        selected_indices = self.get_populated_task_indices(selected_only=True)
+        if not selected_indices:
+            QMessageBox.information(self, "ยังไม่ได้เลือก", "กรุณาติ๊กเลือกงานนิยายที่ต้องการเข้าคิวก่อน")
+            return
+        if self.get_browser_mode() == "guest":
+            QMessageBox.critical(self, "ข้อผิดพลาด", "Guest Mode ไม่เหมาะกับการรันพร้อมกัน เพราะไม่สามารถแชร์ session login ให้หลาย browser ได้")
+            return
+        allow_empty_novel = self.confirm_allow_empty_novel(selected_indices)
+        if not allow_empty_novel:
+            for index in selected_indices:
+                task = self.tasks[index]
+                if not ((task.title_keyword or "").strip() or (task.working_url_override or "").strip()):
+                    return
+        try:
+            if not self.parallel_scheduler_running:
+                self.parallel_profile = self.resolve_profile()
+            jobs, indices = self.build_jobs_for_indices(selected_indices, allow_empty_novel=allow_empty_novel)
+        except Exception as error:
+            QMessageBox.critical(self, "ข้อผิดพลาด", str(error))
+            return
+        added_count = 0
+        for task_index, job in zip(indices, jobs):
+            if task_index in self.parallel_active:
+                continue
+            if any(existing_index == task_index for existing_index, _ in self.parallel_queue):
+                continue
+            self.parallel_queue.append((task_index, job))
+            added_count += 1
+        if added_count == 0:
+            QMessageBox.information(self, "คิวงาน", "งานที่เลือกมีอยู่ในคิวหรือกำลังรันอยู่แล้ว")
+            return
+        self.parallel_scheduler_running = True
+        self.running_task_indices = sorted(set(self.running_task_indices + indices))
+        self.mark_tasks_queued(indices)
+        self.set_busy(True)
+        self.update_status(f"เพิ่มงานเข้าคิวแล้ว {added_count} เรื่อง | กำลังรัน {len(self.parallel_active)} | รอคิว {len(self.parallel_queue)}")
+        self.process_parallel_queue()
 
     def load_task_into_form(self, task: NovelTask):
         self._initializing = True
@@ -3110,6 +3276,8 @@ class UploaderGUI(QWidget):
         self.start_button.setEnabled(not busy)
         self.run_current_button.setEnabled(not busy)
         self.parallel_button.setEnabled(not busy)
+        self.enqueue_selected_button.setEnabled(True)
+        self.max_parallel_spin.setEnabled(True)
         self.calc_button.setEnabled((not busy) and self.schedule_radio.isChecked())
         self.login_button.setEnabled(not busy)
         self.close_login_button.setEnabled(not busy)
@@ -3217,11 +3385,15 @@ class UploaderGUI(QWidget):
             self.parallel_workers = []
             self.parallel_results = {}
             self.parallel_pending_count = len(jobs)
+            self.parallel_queue = list(zip(task_indices, jobs))
+            self.parallel_active = {}
+            self.parallel_profile = profile
+            self.parallel_scheduler_running = True
             for index, task in enumerate(self.tasks):
                 if not (task.chapter_files or task.title_keyword or task.working_url_override):
                     continue
                 if index in self.running_task_indices:
-                    task.status = "running"
+                    task.status = "queued"
                     task.last_error = ""
             self.save_settings()
             self.refresh_task_list_widget(selected_row=self.current_task_index)
@@ -3230,23 +3402,8 @@ class UploaderGUI(QWidget):
             return
 
         self.set_busy(True)
-        self.update_status(f"เริ่มอัปโหลดพร้อมกัน {len(jobs)} เรื่อง...")
-
-        for job, task_index in zip(jobs, task_indices):
-            thread = QThread(self)
-            worker = UploadWorker(job, profile)
-            worker.moveToThread(thread)
-            thread.started.connect(worker.run)
-            worker.status.connect(lambda message, idx=task_index: self.update_status(f"[งาน {idx + 1}] {message}"))
-            worker.finished.connect(lambda success, message, idx=task_index: self.on_parallel_worker_finished(idx, success, message))
-            worker.finished.connect(thread.quit)
-            worker.finished.connect(worker.deleteLater)
-            thread.finished.connect(thread.deleteLater)
-            self.parallel_threads.append(thread)
-            self.parallel_workers.append(worker)
-
-        for thread in self.parallel_threads:
-            thread.start()
+        self.update_status(f"เริ่มอัปโหลดพร้อมกัน {len(jobs)} เรื่อง... (สูงสุด {self.max_parallel_spin.value()} เรื่อง)")
+        self.process_parallel_queue()
 
     def on_parallel_worker_finished(self, task_index, success, message):
         self.parallel_results[task_index] = (success, message)
@@ -3254,25 +3411,11 @@ class UploaderGUI(QWidget):
             task = self.tasks[task_index]
             task.status = "done" if success else "failed"
             task.last_error = "" if success else message
-        self.parallel_pending_count = max(0, self.parallel_pending_count - 1)
+        self.parallel_active.pop(task_index, None)
+        self.parallel_pending_count = max(0, len(self.parallel_queue) + len(self.parallel_active))
         self.refresh_task_list_widget(selected_row=self.current_task_index)
         self.save_settings()
-
-        if self.parallel_pending_count > 0:
-            return
-
-        self.set_busy(False)
-        self.running_task_indices = []
-        failures = [(index, result[1]) for index, result in self.parallel_results.items() if not result[0]]
-        self.parallel_threads = []
-        self.parallel_workers = []
-        if failures:
-            summary = "\n".join(f"งาน {index + 1}: {message}" for index, message in failures)
-            self.update_status("มีบางงานอัปโหลดไม่สำเร็จ")
-            QMessageBox.critical(self, "อัปโหลดพร้อมกันไม่สมบูรณ์", summary)
-        else:
-            self.update_status("อัปโหลดพร้อมกันเสร็จสิ้น")
-            QMessageBox.information(self, "สำเร็จ", "อัปโหลดพร้อมกันเสร็จสิ้น")
+        self.process_parallel_queue()
 
     def on_sequential_job_finished(self, task_index, success, message):
         if 0 <= task_index < len(self.tasks):
@@ -3312,11 +3455,12 @@ class UploaderGUI(QWidget):
 
     def apply_settings(self):
         self.save_current_task_from_form()
-        populated_tasks = [task for task in self.tasks if task.chapter_files or task.title_keyword or task.working_url_override]
-        if not populated_tasks:
+        task_indices = self.get_populated_task_indices(selected_only=True)
+        if not task_indices:
+            task_indices = self.get_populated_task_indices(selected_only=False)
+        if not task_indices:
             QMessageBox.critical(self, "ข้อผิดพลาด", "กรุณาเพิ่มนิยายและเลือกไฟล์อย่างน้อย 1 งาน")
             return
-        task_indices = [index for index, task in enumerate(self.tasks) if task.chapter_files or task.title_keyword or task.working_url_override]
         allow_empty_novel = self.confirm_allow_empty_novel(task_indices)
         if not allow_empty_novel:
             for index in task_indices:
@@ -3336,7 +3480,7 @@ class UploaderGUI(QWidget):
             return
         
         try:
-            jobs = self.build_jobs(allow_empty_novel=allow_empty_novel)
+            jobs, task_indices = self.build_jobs_for_indices(task_indices, allow_empty_novel=allow_empty_novel)
         except Exception as error:
             QMessageBox.critical(self, "ข้อผิดพลาด", str(error))
             return
@@ -3344,14 +3488,15 @@ class UploaderGUI(QWidget):
 
     def apply_parallel_settings(self):
         self.save_current_task_from_form()
-        populated_tasks = [task for task in self.tasks if task.chapter_files or task.title_keyword or task.working_url_override]
-        if len(populated_tasks) < 2:
+        task_indices = self.get_populated_task_indices(selected_only=True)
+        if not task_indices:
+            task_indices = self.get_populated_task_indices(selected_only=False)
+        if len(task_indices) < 2:
             QMessageBox.critical(self, "ข้อผิดพลาด", "โหมดรันพร้อมกันต้องมีอย่างน้อย 2 งาน")
             return
         if self.get_browser_mode() == "guest":
             QMessageBox.critical(self, "ข้อผิดพลาด", "Guest Mode ไม่เหมาะกับการรันพร้อมกัน เพราะไม่สามารถแชร์ session login ให้หลาย browser ได้")
             return
-        task_indices = [index for index, task in enumerate(self.tasks) if task.chapter_files or task.title_keyword or task.working_url_override]
         allow_empty_novel = self.confirm_allow_empty_novel(task_indices)
         if not allow_empty_novel:
             for index in task_indices:
@@ -3369,7 +3514,7 @@ class UploaderGUI(QWidget):
         if reply == QMessageBox.StandardButton.Cancel:
             return
         try:
-            jobs = self.build_jobs(allow_empty_novel=allow_empty_novel)
+            jobs, task_indices = self.build_jobs_for_indices(task_indices, allow_empty_novel=allow_empty_novel)
         except Exception as error:
             QMessageBox.critical(self, "ข้อผิดพลาด", str(error))
             return
@@ -3385,11 +3530,11 @@ class UploaderGUI(QWidget):
             if not (task.chapter_files or task.title_keyword or task.working_url_override):
                 continue
             if success:
-                if task.status == "running":
+                if task.status in {"running", "queued"}:
                     task.status = "done"
                     task.last_error = ""
             else:
-                if task.status == "running":
+                if task.status in {"running", "queued"}:
                     task.status = "pending"
                     task.last_error = ""
         self.running_task_indices = []
