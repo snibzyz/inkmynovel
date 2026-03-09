@@ -1881,6 +1881,8 @@ class UploadWorker(QObject):
         for index, (original_index, filename) in enumerate(enumerate(files)):
             original_title, body = read_chapter_file(filename)
             schedule_dt = schedule_plan[index] if self.job.publish_mode == "scheduled" else None
+            title = self.resolve_upload_title(original_title, filename, index, sequence_plan)
+            body_lines = body
             current_price_mode = self.job.price_mode
             current_price_value = self.job.price_value
             if self.job.price_mode == "auto_free":
