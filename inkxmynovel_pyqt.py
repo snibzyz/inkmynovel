@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
 from PyQt6.QtCore import QDate, QThread, QTime, Qt, QObject, pyqtSignal
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from PyQt6.QtWidgets import (
@@ -514,7 +514,7 @@ class MyNovelBot:
         except Exception:
             driver.execute_script("arguments[0].click();", element)
 
-    def click_add_episode_button(self, driver, wait):
+    def get_add_episode_button_candidates(self, driver):
         add_button_selectors = [
             (By.CSS_SELECTOR, "button.bg-primary.text-white[type='button']"),
             (By.CSS_SELECTOR, "button[class*='bg-primary'][class*='text-white'][type='button']"),
@@ -523,13 +523,6 @@ class MyNovelBot:
             (By.XPATH, "//button[contains(normalize-space(.), 'เพิ่มตอน')]"),
             (By.XPATH, "//button[contains(@class, 'bg-primary') and .//*[contains(@class, 'lucide-plus')]]"),
         ]
-
-        wait.until(
-            lambda d: any(
-                len(d.find_elements(by, selector)) > 0
-                for by, selector in add_button_selectors
-            )
-        )
         add_buttons = []
         for by, selector in add_button_selectors:
             try:
@@ -538,17 +531,94 @@ class MyNovelBot:
                 continue
         if not add_buttons:
             add_buttons = driver.find_elements(By.CSS_SELECTOR, "button.bg-primary, button[class*='bg-primary']")
+        unique_buttons = []
+        seen_signatures = set()
+        for btn in add_buttons:
+            try:
+                signature = (
+                    (btn.text or "").strip(),
+                    (btn.get_attribute("class") or "").strip(),
+                    btn.location.get("x", 0),
+                    btn.location.get("y", 0),
+                    btn.size.get("width", 0),
+                    btn.size.get("height", 0),
+                )
+            except Exception:
+                signature = id(btn)
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            unique_buttons.append(btn)
+        return unique_buttons, add_button_selectors
+
+    def find_submit_episode_button(self, driver):
+        dialog = self.find_visible_episode_dialog(driver)
+        root = dialog or driver
+        candidates = [
+            (By.CSS_SELECTOR, "button[type='submit']"),
+            (By.CSS_SELECTOR, "button[data-slot='button']"),
+            (By.XPATH, ".//button[@type='submit' and contains(., 'สร้างตอน')]"),
+            (By.XPATH, ".//button[contains(., 'สร้างตอน')]"),
+            (By.XPATH, ".//button[contains(., 'บันทึก')]"),
+            (By.XPATH, ".//button[contains(., 'เผยแพร่')]"),
+            (By.XPATH, ".//button[contains(@aria-label, 'สร้างตอน') or contains(@aria-label, 'เผยแพร่') or contains(@aria-label, 'บันทึก')]"),
+        ]
+        for by, value in candidates:
+            try:
+                buttons = root.find_elements(by, value)
+                for btn in buttons:
+                    if btn.is_displayed() and btn.is_enabled():
+                        return btn
+            except Exception:
+                continue
+        if dialog is not None:
+            try:
+                footer_buttons = dialog.find_elements(By.XPATH, ".//button")
+                for btn in reversed(footer_buttons):
+                    try:
+                        button_text = ((btn.text or "") + " " + (btn.get_attribute("aria-label") or "")).strip()
+                        button_type = (btn.get_attribute("type") or "").strip().lower()
+                        if not btn.is_displayed() or not btn.is_enabled():
+                            continue
+                        if button_type == "submit" or any(keyword in button_text for keyword in ["สร้างตอน", "เผยแพร่", "บันทึก", "submit"]):
+                            return btn
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        return None
+
+    def click_add_episode_button(self, driver, wait):
+        _, add_button_selectors = self.get_add_episode_button_candidates(driver)
+
+        wait.until(
+            lambda d: any(
+                len(d.find_elements(by, selector)) > 0
+                for by, selector in add_button_selectors
+            )
+        )
+        add_buttons, _ = self.get_add_episode_button_candidates(driver)
         current_url = driver.current_url
         last_error = RuntimeError("ไม่พบฟอร์มเพิ่มตอนหลังจากกดปุ่ม")
         self.log_debug(driver, f"พบปุ่มเพิ่มตอน {len(add_buttons)} ปุ่ม")
-        for btn in add_buttons:
+        for button_index in range(len(add_buttons)):
             try:
-                if not btn.is_displayed() or not btn.is_enabled():
+                if not add_buttons[button_index].is_displayed() or not add_buttons[button_index].is_enabled():
                     continue
-                button_text = (btn.text or "").strip()
-                button_class = (btn.get_attribute("class") or "").strip()
+                button_text = (add_buttons[button_index].text or "").strip()
+                button_class = (add_buttons[button_index].get_attribute("class") or "").strip()
                 self.log_debug(driver, f"ลองกดปุ่มเพิ่มตอน: text='{button_text}' class='{button_class[:120]}'")
                 for attempt in range(2):
+                    current_buttons, _ = self.get_add_episode_button_candidates(driver)
+                    if button_index >= len(current_buttons):
+                        last_error = RuntimeError(f"ปุ่มเพิ่มตอนลำดับ {button_index + 1} หายไปหลัง DOM refresh")
+                        break
+                    btn = current_buttons[button_index]
+                    if not btn.is_displayed() or not btn.is_enabled():
+                        continue
+                    button_text = (btn.text or "").strip()
+                    button_class = (btn.get_attribute("class") or "").strip()
+                    self.log_debug(driver, f"ลองกดปุ่มเพิ่มตอน: text='{button_text}' class='{button_class[:120]}'")
                     self.click_element(driver, btn)
                     try:
                         WebDriverWait(driver, 8).until(
@@ -562,7 +632,7 @@ class MyNovelBot:
                         )
                         self.log_debug(driver, "กดปุ่มเพิ่มตอนสำเร็จ")
                         return
-                    except TimeoutException as error:
+                    except (StaleElementReferenceException, TimeoutException) as error:
                         last_error = error
                         self.log_debug(driver, f"คลิกเพิ่มตอนแล้วแต่ยังไม่เห็นฟอร์ม (retry {attempt + 1}/2)")
                         time.sleep(0.3)
@@ -1026,8 +1096,6 @@ class MyNovelBot:
                         break
                 except Exception:
                     continue
-            if price_input is None:
-                time.sleep(0.2)
         if price_input is None:
             raise RuntimeError("ไม่พบช่องกรอกราคาตอน")
         try:
@@ -1204,45 +1272,7 @@ class MyNovelBot:
         self.log_process_time(driver, "กรอกฟอร์มรวม", form_started)
 
     def submit_episode(self, driver, wait):
-        dialog = self.find_visible_episode_dialog(driver)
-        root = dialog or driver
-        submit_button = None
-        candidates = [
-            (By.CSS_SELECTOR, "button[type='submit']"),
-            (By.CSS_SELECTOR, "button[data-slot='button']"),
-            (By.XPATH, ".//button[@type='submit' and contains(., 'สร้างตอน')]"),
-            (By.XPATH, ".//button[contains(., 'สร้างตอน')]"),
-            (By.XPATH, ".//button[contains(., 'บันทึก')]"),
-            (By.XPATH, ".//button[contains(., 'เผยแพร่')]"),
-            (By.XPATH, ".//button[contains(@aria-label, 'สร้างตอน') or contains(@aria-label, 'เผยแพร่') or contains(@aria-label, 'บันทึก')]"),
-        ]
-        for by, value in candidates:
-            try:
-                buttons = root.find_elements(by, value)
-                for btn in buttons:
-                    if btn.is_displayed() and btn.is_enabled():
-                        submit_button = btn
-                        break
-                if submit_button is not None:
-                    break
-            except Exception:
-                continue
-        if submit_button is None and dialog is not None:
-            try:
-                footer_buttons = dialog.find_elements(By.XPATH, ".//button")
-                for btn in reversed(footer_buttons):
-                    try:
-                        button_text = ((btn.text or "") + " " + (btn.get_attribute("aria-label") or "")).strip()
-                        button_type = (btn.get_attribute("type") or "").strip().lower()
-                        if not btn.is_displayed() or not btn.is_enabled():
-                            continue
-                        if button_type == "submit" or any(keyword in button_text for keyword in ["สร้างตอน", "เผยแพร่", "บันทึก", "submit"]):
-                            submit_button = btn
-                            break
-                    except Exception:
-                        continue
-            except Exception:
-                pass
+        submit_button = self.find_submit_episode_button(driver)
         if submit_button is None:
             raise RuntimeError("กดปุ่มสร้างตอนไม่สำเร็จ: ไม่พบปุ่ม submit")
 
@@ -1256,9 +1286,14 @@ class MyNovelBot:
         last_error = None
         for attempt in range(3):
             try:
-                if not submit_button.is_displayed() or not submit_button.is_enabled():
-                    submit_button = self.find_visible_episode_dialog(driver).find_element(By.XPATH, ".//button[@type='submit' or contains(., 'สร้างตอน') or contains(., 'บันทึก') or contains(., 'เผยแพร่')]")
+                submit_button = self.find_submit_episode_button(driver)
+                if submit_button is None:
+                    raise RuntimeError("ไม่พบปุ่ม submit หลัง DOM refresh")
                 self.log_debug(driver, f"ลองกดสร้างตอน ครั้งที่ {attempt + 1}")
+                try:
+                    self.scroll_modal_element_into_view(driver, submit_button)
+                except Exception:
+                    pass
                 self.click_element(driver, submit_button)
                 WebDriverWait(driver, 6).until(lambda d: self.find_visible_episode_dialog(d) is None)
                 self.log_debug(driver, "กดสร้างตอนสำเร็จและฟอร์มปิดแล้ว")
@@ -1304,6 +1339,7 @@ class MyNovelBot:
             for i, filename in enumerate(files):
                 title, body = read_chapter_file(filename)
                 schedule_dt = schedule_plan[i] if schedule_plan else None
+                previous_latest_row = None
                 chapter_started = time.perf_counter()
                 self.log(f"เริ่มอัปโหลด ({i + 1}/{len(files)}): {Path(filename).name}")
                 try:
@@ -1314,7 +1350,19 @@ class MyNovelBot:
                     self.fill_episode_form(driver, wait, title, body, job.price_mode, job.price_value, job.publish_mode, schedule_dt)
                     self.log(f"เวลาตั้งค่าฟอร์มตอน: {time.perf_counter() - step_started:.2f}s")
                     step_started = time.perf_counter()
-                    self.submit_episode(driver, wait)
+                    previous_latest_row = self.submit_episode_with_recovery(
+                        self,
+                        driver,
+                        wait,
+                        working_url,
+                        previous_latest_row,
+                        title,
+                        body,
+                        job.price_mode,
+                        job.price_value,
+                        job.publish_mode,
+                        schedule_dt,
+                    )
                     self.log(f"เวลากดสร้างตอน: {time.perf_counter() - step_started:.2f}s")
                     elapsed_seconds = time.perf_counter() - chapter_started
                     uploaded_count += 1
@@ -1632,10 +1680,61 @@ class UploadWorker(QObject):
             if previous_order is not None and latest_order is not None and latest_order > previous_order:
                 return latest_row
             time.sleep(0.5)
+
         raise RuntimeError(
             f"ยืนยันหลังอัปโหลดไม่ผ่าน: ตอนล่าสุดบนเว็บยังไม่เปลี่ยนเป็น '{expected_title}'"
             + (f" (ล่าสุดตอนนี้: '{(latest_row or {}).get('title', '')}')" if latest_row else "")
         )
+
+    def is_retryable_submit_error(self, error):
+        if isinstance(error, (StaleElementReferenceException, TimeoutException)):
+            return True
+        message = f"{type(error).__name__}: {error}".lower()
+        retryable_keywords = [
+            "staleelementreference",
+            "stale element",
+            "timeout",
+            "ไม่พบปุ่ม submit",
+            "กดปุ่มสร้างตอนไม่สำเร็จ",
+        ]
+        return any(keyword in message for keyword in retryable_keywords)
+
+    def submit_episode_with_recovery(self, bot, driver, wait, working_url, previous_latest_row, title, body_lines, price_mode, price_value, publish_mode, schedule_dt):
+        try:
+            bot.submit_episode(driver, wait)
+            return self.verify_episode_created(bot, driver, wait, previous_latest_row, title)
+        except Exception as submit_error:
+            if not self.is_retryable_submit_error(submit_error):
+                raise
+            bot.log(f"submit ล้มเหลวแบบกู้คืนได้ จะลอง refresh/recheck | {type(submit_error).__name__}: {submit_error}")
+
+        episode_url = self.normalize_episode_url(working_url or driver.current_url)
+        if episode_url:
+            bot.log(f"กำลังกลับไปหน้า episode เพื่อตรวจตอนล่าสุด: {episode_url}")
+        else:
+            bot.log("กำลัง refresh หน้าปัจจุบันเพื่อตรวจตอนล่าสุด")
+        try:
+            if episode_url:
+                driver.get(episode_url)
+            else:
+                driver.refresh()
+            self.ensure_episode_tab(driver, wait)
+        except Exception as refresh_error:
+            bot.log(f"กลับหน้า episode ไม่สำเร็จ แต่จะลองตรวจต่อ: {type(refresh_error).__name__}: {refresh_error}")
+
+        try:
+            latest_row = self.verify_episode_created(bot, driver, wait, previous_latest_row, title)
+            bot.log("ตรวจพบว่าตอนถูกสร้างแล้วหลัง refresh จะข้ามการ submit ซ้ำ")
+            return latest_row
+        except Exception as verify_error:
+            bot.log(f"หลัง refresh ยังไม่พบตอนล่าสุด จะ reopen ฟอร์มแล้วลองใหม่อีก 1 ครั้ง | {type(verify_error).__name__}: {verify_error}")
+
+        self.ensure_episode_creator_open(bot, driver, wait, working_url)
+        bot.fill_episode_form(driver, wait, title, body_lines, price_mode, price_value, publish_mode, schedule_dt)
+        bot.submit_episode(driver, wait)
+        latest_row = self.verify_episode_created(bot, driver, wait, previous_latest_row, title)
+        bot.log("reopen modal และ submit ซ้ำสำเร็จ")
+        return latest_row
 
     def ensure_episode_tab(self, driver, wait):
         episode_url = self.normalize_episode_url(driver.current_url)
@@ -1810,10 +1909,20 @@ class UploadWorker(QObject):
                 bot.fill_episode_form(driver, wait, title, body_lines, current_price_mode, current_price_value, self.job.publish_mode, schedule_dt)
                 bot.log(f"เวลาตั้งค่าฟอร์มตอน: {time.perf_counter() - step_started:.2f}s")
                 step_started = time.perf_counter()
-                bot.submit_episode(driver, wait)
+                previous_latest_row = self.submit_episode_with_recovery(
+                    bot,
+                    driver,
+                    wait,
+                    working_url,
+                    previous_latest_row,
+                    title,
+                    body_lines,
+                    current_price_mode,
+                    current_price_value,
+                    self.job.publish_mode,
+                    schedule_dt,
+                )
                 bot.log(f"เวลากดสร้างตอน: {time.perf_counter() - step_started:.2f}s")
-                step_started = time.perf_counter()
-                previous_latest_row = self.verify_episode_created(bot, driver, wait, previous_latest_row, title)
                 bot.log(f"เวลายืนยันตอนล่าสุดหลังอัปโหลด: {time.perf_counter() - step_started:.2f}s")
                 elapsed_seconds = time.perf_counter() - episode_started
                 uploaded_count += 1
