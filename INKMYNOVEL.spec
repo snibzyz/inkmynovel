@@ -15,10 +15,15 @@
 import os
 import sys
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 is_macos = sys.platform == "darwin"
 is_windows = sys.platform == "win32"
+
+# macOS build architecture. Set INKMYNOVEL_TARGET_ARCH=universal2 (or x86_64)
+# in CI to produce one binary that runs on both Intel and Apple Silicon.
+# Unset = native architecture of the build machine.
+target_arch = os.environ.get("INKMYNOVEL_TARGET_ARCH") or None
 
 # Optional app icon: used only if the file exists under assets/.
 icon_path = None
@@ -36,11 +41,14 @@ datas = collect_data_files("selenium")
 if os.path.exists("VERSION"):
     datas += [("VERSION", ".")]
 
+# collect_submodules pulls in every selenium submodule. Selenium 4.x
+# lazy-loads selenium.webdriver.chrome.* so PyInstaller's static analysis
+# misses it on its own, causing "No module named ..." at runtime.
 hiddenimports = [
     "PyQt6.QtCore",
     "PyQt6.QtGui",
     "PyQt6.QtWidgets",
-]
+] + collect_submodules("selenium")
 
 a = Analysis(
     ["inkxmynovel_pyqt.py"],
@@ -84,7 +92,7 @@ exe = EXE(
     console=False,             # GUI app — no console window
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
+    target_arch=target_arch,
     codesign_identity=None,
     entitlements_file=None,
     icon=icon_path,
