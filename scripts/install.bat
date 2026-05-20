@@ -4,7 +4,7 @@ set "ROOT=%~dp0.."
 cd /d "%ROOT%"
 
 echo ============================================================
-echo   InkMyNovel - install dependencies (Windows)
+echo   INKMYNOVEL - install dependencies (Windows)
 echo ============================================================
 echo.
 

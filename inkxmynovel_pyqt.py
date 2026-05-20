@@ -60,7 +60,7 @@ def _user_data_dir() -> Path:
         base = str(Path.home() / "Library" / "Application Support")
     else:
         base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "InkMyNovel"
+    return Path(base) / "INKMYNOVEL"
 
 
 if IS_FROZEN:

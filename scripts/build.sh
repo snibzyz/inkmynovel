@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Build InkMyNovel into a single-file app with PyInstaller.
-#   macOS -> dist/InkMyNovel.app
-#   Linux -> dist/InkMyNovel
+# Build INKMYNOVEL into a single-file app with PyInstaller.
+#   macOS -> dist/INKMYNOVEL.app
+#   Linux -> dist/INKMYNOVEL
 set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 echo "============================================================"
-echo " Building InkMyNovel"
+echo " Building INKMYNOVEL"
 echo "============================================================"
 
 # Prefer the project's .venv; fall back to system python3.
@@ -28,16 +28,16 @@ echo "[2/3] Cleaning previous build..."
 rm -rf build dist
 
 echo "[3/3] Running PyInstaller..."
-"$PY" -m PyInstaller --noconfirm --clean InkMyNovel.spec
+"$PY" -m PyInstaller --noconfirm --clean INKMYNOVEL.spec
 
 echo
 echo "============================================================"
 echo " Build OK"
-if [ -d "dist/InkMyNovel.app" ]; then
-  echo " Output : $ROOT/dist/InkMyNovel.app"
-  echo " Tip    : drag InkMyNovel.app into /Applications."
+if [ -d "dist/INKMYNOVEL.app" ]; then
+  echo " Output : $ROOT/dist/INKMYNOVEL.app"
+  echo " Tip    : drag INKMYNOVEL.app into /Applications."
   echo "          First launch: right-click the app -> Open -> Open."
 else
-  echo " Output : $ROOT/dist/InkMyNovel"
+  echo " Output : $ROOT/dist/INKMYNOVEL"
 fi
 echo "============================================================"

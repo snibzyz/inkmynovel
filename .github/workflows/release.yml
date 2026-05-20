@@ -1,6 +1,6 @@
 name: Release
 
-# Builds InkMyNovel for Windows + macOS (Apple Silicon & Intel) and
+# Builds INKMYNOVEL for Windows + macOS (Apple Silicon & Intel) and
 # publishes a GitHub Release.
 # Trigger: push a version tag, e.g.  git tag v1.0.0 && git push origin v1.0.0
 # (workflow_dispatch runs the builds for testing without publishing.)
@@ -32,14 +32,14 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build InkMyNovel.exe
-        run: python -m PyInstaller --noconfirm --clean InkMyNovel.spec
+      - name: Build INKMYNOVEL.exe
+        run: python -m PyInstaller --noconfirm --clean INKMYNOVEL.spec
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: InkMyNovel-windows
-          path: dist/InkMyNovel.exe
+          name: INKMYNOVEL-windows
+          path: dist/INKMYNOVEL.exe
 
   build-macos:
     strategy:
@@ -66,25 +66,25 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build InkMyNovel.app
-        run: python -m PyInstaller --noconfirm --clean InkMyNovel.spec
+      - name: Build INKMYNOVEL.app
+        run: python -m PyInstaller --noconfirm --clean INKMYNOVEL.spec
 
       - name: Package as .dmg
         run: |
           mkdir -p dist/dmg
-          cp -R dist/InkMyNovel.app dist/dmg/
+          cp -R dist/INKMYNOVEL.app dist/dmg/
           ln -s /Applications dist/dmg/Applications
           hdiutil create \
-            -volname InkMyNovel \
+            -volname INKMYNOVEL \
             -srcfolder dist/dmg \
             -ov -format UDZO \
-            dist/InkMyNovel-${{ matrix.arch }}.dmg
+            dist/INKMYNOVEL-${{ matrix.arch }}.dmg
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: InkMyNovel-macos-${{ matrix.arch }}
-          path: dist/InkMyNovel-${{ matrix.arch }}.dmg
+          name: INKMYNOVEL-macos-${{ matrix.arch }}
+          path: dist/INKMYNOVEL-${{ matrix.arch }}.dmg
 
   release:
     needs: [build-windows, build-macos]
@@ -102,5 +102,5 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
-          name: InkMyNovel ${{ github.ref_name }}
+          name: INKMYNOVEL ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}

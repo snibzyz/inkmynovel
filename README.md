@@ -1,4 +1,4 @@
-# InkMyNovel Uploader
+# INKMYNOVEL Uploader
 
 โปรแกรมช่วยอัปโหลดตอนนิยายขึ้นเว็บ [MyNovel](https://mynovel.co) แบบกึ่งอัตโนมัติ
 รองรับหลายเรื่องพร้อมกัน ตั้งราคา ตั้งเวลาเผยแพร่ และตรวจสอบตอนซ้ำ/ตอนข้ามให้อัตโนมัติ
@@ -44,15 +44,15 @@
 หรือสร้างเองตามหัวข้อ [สร้างไฟล์โปรแกรมเอง (build)](#สร้างไฟล์โปรแกรมเอง-build)
 
 **บน Windows**
-1. ดาวน์โหลด `InkMyNovel.exe`
+1. ดาวน์โหลด `INKMYNOVEL.exe`
 2. ดับเบิลคลิกได้เลย
 3. ถ้ามีแถบเตือนของ Windows ขึ้น → กด **More info** → **Run anyway**
 
 **บน macOS**
 1. ดาวน์โหลดไฟล์ `.dmg` ให้ตรงกับชิปของเครื่อง
-   - Mac ชิป Apple (M1/M2/M3/M4) → `InkMyNovel-arm64.dmg`
-   - Mac ชิป Intel (รุ่นเก่า) → `InkMyNovel-intel.dmg`
-2. เปิดไฟล์ `.dmg` แล้วลากแอป `InkMyNovel` ไปวางในโฟลเดอร์ `Applications`
+   - Mac ชิป Apple (M1/M2/M3/M4) → `INKMYNOVEL-arm64.dmg`
+   - Mac ชิป Intel (รุ่นเก่า) → `INKMYNOVEL-intel.dmg`
+2. เปิดไฟล์ `.dmg` แล้วลากแอป `INKMYNOVEL` ไปวางในโฟลเดอร์ `Applications`
 3. ครั้งแรกให้ **คลิกขวาที่แอป → Open → Open** (เพื่อผ่านด่าน Gatekeeper)
 4. ครั้งต่อ ๆ ไปดับเบิลคลิกได้ตามปกติ
 
@@ -82,17 +82,17 @@ scripts\run.bat        :: เปิดโปรแกรม
 
 แปลงซอร์สโค้ดเป็นไฟล์โปรแกรมไฟล์เดียว (พกพาได้) ด้วย PyInstaller
 
-**บน Windows** → ได้ `dist\InkMyNovel.exe`
+**บน Windows** → ได้ `dist\INKMYNOVEL.exe`
 ```bat
 scripts\build.bat
 ```
 
-**บน macOS** → ได้ `dist/InkMyNovel.app`
+**บน macOS** → ได้ `dist/INKMYNOVEL.app`
 ```bash
 ./scripts/build.sh
 ```
 
-สคริปต์ build จะติดตั้ง PyInstaller และ dependencies ให้เอง แล้วสั่ง build ตามไฟล์ `InkMyNovel.spec`
+สคริปต์ build จะติดตั้ง PyInstaller และ dependencies ให้เอง แล้วสั่ง build ตามไฟล์ `INKMYNOVEL.spec`
 ผลลัพธ์เป็นไฟล์เดียว แจกจ่ายได้ และเครื่องปลายทางไม่ต้องติดตั้ง Python (แต่ยังต้องมี Chrome)
 
 > ต้อง build แยกตามระบบปฏิบัติการ — build บน Windows ได้ `.exe`, build บน Mac ได้ `.app`
@@ -101,8 +101,8 @@ scripts\build.bat
 ### ออก Release อัตโนมัติ
 
 โปรเจกต์มี GitHub Actions ([.github/workflows/release.yml](.github/workflows/release.yml)) ไว้ build ให้ครบทั้งสองระบบ
-เมื่อ push git tag แบบ `vX.Y.Z` ระบบจะ build ให้อัตโนมัติทั้ง `InkMyNovel.exe` (Windows),
-`InkMyNovel-arm64.dmg` (Mac ชิป Apple) และ `InkMyNovel-intel.dmg` (Mac ชิป Intel)
+เมื่อ push git tag แบบ `vX.Y.Z` ระบบจะ build ให้อัตโนมัติทั้ง `INKMYNOVEL.exe` (Windows),
+`INKMYNOVEL-arm64.dmg` (Mac ชิป Apple) และ `INKMYNOVEL-intel.dmg` (Mac ชิป Intel)
 แล้วสร้าง Release พร้อมไฟล์ให้ดาวน์โหลด
 
 ```bash
@@ -174,8 +174,8 @@ git push origin v1.0.1
 | วิธีรัน | ตำแหน่งที่เก็บข้อมูล |
 |---|---|
 | รันจากซอร์สโค้ด | โฟลเดอร์โปรเจกต์ (ข้างไฟล์ `inkxmynovel_pyqt.py`) |
-| ไฟล์โปรแกรมสำเร็จรูป — Windows | `%APPDATA%\InkMyNovel\` |
-| ไฟล์โปรแกรมสำเร็จรูป — macOS | `~/Library/Application Support/InkMyNovel/` |
+| ไฟล์โปรแกรมสำเร็จรูป — Windows | `%APPDATA%\INKMYNOVEL\` |
+| ไฟล์โปรแกรมสำเร็จรูป — macOS | `~/Library/Application Support/INKMYNOVEL/` |
 
 ไฟล์เหล่านี้เป็นข้อมูลเฉพาะเครื่อง ไม่ถูก push ขึ้น git
 
@@ -188,7 +188,7 @@ git push origin v1.0.1
 | โปรแกรมหา Chrome ไม่เจอ | ติดตั้ง Google Chrome ก่อน |
 | `เปิด Chrome profile ไม่สำเร็จ` | ปิด Chrome ที่เปิดอยู่ด้วย profile เดียวกันก่อน หรือเปลี่ยนไปใช้ `Automation Profile` |
 | `ยังไม่ได้ล็อกอิน` | กด **เปิดหน้า Login MyNovel** แล้ว login ให้เสร็จก่อนเริ่มรัน |
-| macOS เตือนว่าแอป "เสียหาย" หรือเปิดไม่ได้ | คลิกขวาที่แอป → **Open** → **Open** หรือสั่ง `xattr -cr InkMyNovel.app` |
+| macOS เตือนว่าแอป "เสียหาย" หรือเปิดไม่ได้ | คลิกขวาที่แอป → **Open** → **Open** หรือสั่ง `xattr -cr INKMYNOVEL.app` |
 | สคริปต์ `.sh` รันไม่ได้ (Permission denied) | สั่ง `chmod +x scripts/*.sh` หนึ่งครั้ง |
 
 ---
@@ -199,7 +199,7 @@ git push origin v1.0.1
 |---|---|
 | `inkxmynovel_pyqt.py` | โค้ดหลักของโปรแกรม |
 | `requirements.txt` | รายการแพ็กเกจที่ต้องติดตั้ง (`selenium`, `PyQt6`) |
-| `InkMyNovel.spec` | ค่าตั้งสำหรับ build เป็นไฟล์โปรแกรมด้วย PyInstaller |
+| `INKMYNOVEL.spec` | ค่าตั้งสำหรับ build เป็นไฟล์โปรแกรมด้วย PyInstaller |
 | `scripts/install.*` | ติดตั้ง dependencies (`.bat` = Windows, `.sh` = macOS/Linux) |
 | `scripts/run.*` | เปิดโปรแกรมจากซอร์สโค้ด |
 | `scripts/build.*` | build เป็นไฟล์โปรแกรม `.exe` / `.app` |

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# First-time install for InkMyNovel (macOS / Linux): create .venv + deps.
+# First-time install for INKMYNOVEL (macOS / Linux): create .venv + deps.
 set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 echo "============================================================"
-echo "  InkMyNovel - install dependencies (macOS / Linux)"
+echo "  INKMYNOVEL - install dependencies (macOS / Linux)"
 echo "============================================================"
 
 if ! command -v python3 >/dev/null 2>&1; then

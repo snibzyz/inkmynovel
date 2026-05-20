@@ -4,7 +4,7 @@ set "ROOT=%~dp0.."
 cd /d "%ROOT%"
 
 echo ============================================================
-echo  Building InkMyNovel.exe  (portable, single file)
+echo  Building INKMYNOVEL.exe  (portable, single file)
 echo ============================================================
 echo.
 
@@ -33,14 +33,14 @@ if exist dist  rmdir /s /q dist
 echo.
 
 echo [3/3] Running PyInstaller...
-"%PY%" -m PyInstaller --noconfirm --clean InkMyNovel.spec
+"%PY%" -m PyInstaller --noconfirm --clean INKMYNOVEL.spec
 if errorlevel 1 goto :fail
 
 echo.
 echo ============================================================
 echo  Build OK
-echo  Output : %CD%\dist\InkMyNovel.exe
-echo  Tip    : copy InkMyNovel.exe anywhere and double-click to run.
+echo  Output : %CD%\dist\INKMYNOVEL.exe
+echo  Tip    : copy INKMYNOVEL.exe anywhere and double-click to run.
 echo ============================================================
 echo.
 pause

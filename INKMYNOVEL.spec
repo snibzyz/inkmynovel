@@ -1,13 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for InkMyNovel Uploader (cross-platform, single file).
+# PyInstaller spec for INKMYNOVEL Uploader (cross-platform, single file).
 #
 # Build:
-#   python -m PyInstaller --noconfirm --clean InkMyNovel.spec
+#   python -m PyInstaller --noconfirm --clean INKMYNOVEL.spec
 #
 # Output:
-#   Windows : dist/InkMyNovel.exe   (portable single file, windowed)
-#   macOS   : dist/InkMyNovel.app   (windowed app bundle)
-#   Linux   : dist/InkMyNovel       (portable single file)
+#   Windows : dist/INKMYNOVEL.exe   (portable single file, windowed)
+#   macOS   : dist/INKMYNOVEL.app   (windowed app bundle)
+#   Linux   : dist/INKMYNOVEL       (portable single file)
 #
 # Note: Google Chrome is NOT bundled — it must already be installed on the
 # target machine. The matching chromedriver is fetched by Selenium Manager.
@@ -69,7 +69,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="InkMyNovel",
+    name="INKMYNOVEL",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -88,12 +88,12 @@ exe = EXE(
 if is_macos:
     app = BUNDLE(
         exe,
-        name="InkMyNovel.app",
+        name="INKMYNOVEL.app",
         icon=icon_path,
         bundle_identifier="com.snibzyz.inkmynovel",
         info_plist={
-            "CFBundleName": "InkMyNovel",
-            "CFBundleDisplayName": "InkMyNovel Uploader",
+            "CFBundleName": "INKMYNOVEL",
+            "CFBundleDisplayName": "INKMYNOVEL Uploader",
             "CFBundleShortVersionString": "1.0.0",
             "CFBundleVersion": "1.0.0",
             "NSHighResolutionCapable": True,

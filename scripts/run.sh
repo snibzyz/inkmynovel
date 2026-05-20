@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch InkMyNovel from source (macOS / Linux).
+# Launch INKMYNOVEL from source (macOS / Linux).
 set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
