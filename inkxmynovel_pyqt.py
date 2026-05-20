@@ -3336,31 +3336,36 @@ class UploaderGUI(QWidget):
             QMessageBox.critical(self, "ข้อผิดพลาด", str(error))
             return
 
-        try:
-            reused_existing = self.login_driver is not None
-            driver = self.ensure_login_browser(profile)
-            if not reused_existing:
-                QMessageBox.information(
-                    self,
-                    "Login",
-                    "ยังไม่มีหน้าต่าง Login ที่เปิดอยู่\n\n"
-                    "กรุณาล็อกอิน MyNovel ในหน้าต่าง Chrome ที่เปิดขึ้นมา\n"
-                    "หลังจากล็อกอินเสร็จแล้ว กด OK เพื่อเริ่มอัปโหลด"
-                )
-            else:
-                self.update_status("ใช้ session Login ที่เปิดค้างไว้อยู่แล้ว")
-        except Exception as error:
-            self.reset_task_statuses(self.running_task_indices)
-            self.running_task_indices = []
-            QMessageBox.critical(self, "เปิดหน้า Login ไม่สำเร็จ", str(error))
-            return
-        try:
-            driver.get("https://mynovel.co/dashboard/workings")
-        except Exception as error:
-            self.reset_task_statuses(self.running_task_indices)
-            self.running_task_indices = []
-            QMessageBox.critical(self, "เปลี่ยนหน้าไม่สำเร็จ", str(error))
-            return
+        run_headless_only = all(bool(job.headless) for job in jobs)
+        driver = None
+        if not run_headless_only:
+            try:
+                reused_existing = self.login_driver is not None
+                driver = self.ensure_login_browser(profile)
+                if not reused_existing:
+                    QMessageBox.information(
+                        self,
+                        "Login",
+                        "ยังไม่มีหน้าต่าง Login ที่เปิดอยู่\n\n"
+                        "กรุณาล็อกอิน MyNovel ในหน้าต่าง Chrome ที่เปิดขึ้นมา\n"
+                        "หลังจากล็อกอินเสร็จแล้ว กด OK เพื่อเริ่มอัปโหลด"
+                    )
+                else:
+                    self.update_status("ใช้ session Login ที่เปิดค้างไว้อยู่แล้ว")
+            except Exception as error:
+                self.reset_task_statuses(self.running_task_indices)
+                self.running_task_indices = []
+                QMessageBox.critical(self, "เปิดหน้า Login ไม่สำเร็จ", str(error))
+                return
+            try:
+                driver.get("https://mynovel.co/dashboard/workings")
+            except Exception as error:
+                self.reset_task_statuses(self.running_task_indices)
+                self.running_task_indices = []
+                QMessageBox.critical(self, "เปลี่ยนหน้าไม่สำเร็จ", str(error))
+                return
+        else:
+            self.update_status("เริ่มโหมดซ่อนจอ: สร้าง browser ใหม่ตามงาน (ไม่เปิดหน้า Login)")
 
         self.thread = QThread(self)
         self.worker = UploadWorker(jobs, profile, existing_driver=driver)
