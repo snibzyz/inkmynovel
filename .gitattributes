@@ -1,5 +1,6 @@
 # Force LF for shell scripts so they run on macOS / Linux
-*.sh    text eol=lf
+*.sh        text eol=lf
+*.command   text eol=lf
 
 # Force CRLF for Windows batch files
 *.bat   text eol=crlf

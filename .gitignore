@@ -10,6 +10,9 @@ venv/
 build/
 dist/
 
+# Local release-staging downloads
+release_tmp/
+
 # Local app data
 config.json
 inkxmynovel_novel_list.txt
