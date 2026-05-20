@@ -25,6 +25,15 @@ is_windows = sys.platform == "win32"
 # Unset = native architecture of the build machine.
 target_arch = os.environ.get("INKMYNOVEL_TARGET_ARCH") or None
 
+# App version. Single source of truth is the VERSION file at the repo root
+# (the CI stamps it from the git tag before building).
+app_version = "0.0.0"
+try:
+    with open("VERSION", encoding="utf-8") as _vf:
+        app_version = _vf.read().strip() or "0.0.0"
+except OSError:
+    pass
+
 # Optional app icon: used only if the file exists under assets/.
 icon_path = None
 if is_windows and os.path.exists(os.path.join("assets", "icon.ico")):
@@ -107,8 +116,8 @@ if is_macos:
         info_plist={
             "CFBundleName": "INKMYNOVEL",
             "CFBundleDisplayName": "INKMYNOVEL Uploader",
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleVersion": "1.0.0",
+            "CFBundleShortVersionString": app_version,
+            "CFBundleVersion": app_version,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
         },
