@@ -49,9 +49,10 @@
 3. ถ้ามีแถบเตือนของ Windows ขึ้น → กด **More info** → **Run anyway**
 
 **บน macOS**
-1. ดาวน์โหลด `InkMyNovel.app`
-2. ครั้งแรกให้ **คลิกขวาที่แอป → Open → Open** (เพื่อผ่านด่าน Gatekeeper)
-3. ครั้งต่อ ๆ ไปดับเบิลคลิกได้ตามปกติ
+1. ดาวน์โหลด `InkMyNovel.dmg`
+2. เปิดไฟล์ `.dmg` แล้วลากแอป `InkMyNovel` ไปวางในโฟลเดอร์ `Applications`
+3. ครั้งแรกให้ **คลิกขวาที่แอป → Open → Open** (เพื่อผ่านด่าน Gatekeeper)
+4. ครั้งต่อ ๆ ไปดับเบิลคลิกได้ตามปกติ
 
 ### แบบที่ 2 — รันจากซอร์สโค้ด
 
@@ -92,6 +93,17 @@ scripts\build.bat
 
 > ต้อง build แยกตามระบบปฏิบัติการ — build บน Windows ได้ `.exe`, build บน Mac ได้ `.app`
 > ไม่สามารถ build ข้ามเครื่องได้
+
+### ออก Release อัตโนมัติ
+
+โปรเจกต์มี GitHub Actions ([.github/workflows/release.yml](.github/workflows/release.yml)) ไว้ build ให้ครบทั้งสองระบบ
+เมื่อ push git tag แบบ `vX.Y.Z` ระบบจะ build `InkMyNovel.exe` และ `InkMyNovel.dmg` ให้อัตโนมัติ
+แล้วสร้าง Release พร้อมไฟล์ให้ดาวน์โหลด
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
 
 ---
 
