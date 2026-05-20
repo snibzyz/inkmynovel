@@ -63,6 +63,23 @@ def _user_data_dir() -> Path:
     return Path(base) / "INKMYNOVEL"
 
 
+def _resource_dir() -> Path:
+    """Directory holding bundled read-only resources (e.g. the VERSION file)."""
+    if IS_FROZEN:
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return Path(__file__).resolve().parent
+
+
+def _read_app_version() -> str:
+    try:
+        version_file = _resource_dir() / "VERSION"
+        if version_file.exists():
+            return version_file.read_text(encoding="utf-8").strip() or "0.0.0"
+    except Exception:
+        pass
+    return "0.0.0"
+
+
 if IS_FROZEN:
     APP_DIR = _user_data_dir()
     APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -73,6 +90,9 @@ if IS_FROZEN:
 else:
     APP_DIR = Path(__file__).resolve().parent
 
+APP_VERSION = _read_app_version()
+GITHUB_REPO = "snibzyz/inkmynovel"
+RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 DEFAULT_PRICE = 20
 
 
@@ -2054,6 +2074,56 @@ class UploadWorker(QObject):
             self.finished.emit(False, f"{type(error).__name__}: {error_message}")
 
 
+def _parse_version(text: str):
+    """Turn '1.2.3' or 'v1.2.3' into a comparable tuple of ints."""
+    parts = re.findall(r"\d+", text or "")
+    return tuple(int(p) for p in parts) if parts else (0,)
+
+
+def fetch_latest_release(timeout: float = 6.0):
+    """Return (latest_version, release_url) from GitHub, or None on any failure."""
+    import json
+    import urllib.request
+
+    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    request = urllib.request.Request(
+        api_url,
+        headers={
+            "User-Agent": "INKMYNOVEL-Uploader",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = json.load(response)
+    tag = str(data.get("tag_name") or "").strip()
+    if not tag:
+        return None
+    release_url = str(data.get("html_url") or RELEASES_URL).strip()
+    return tag.lstrip("vV"), release_url
+
+
+class UpdateChecker(QObject):
+    """Background worker that checks GitHub for a newer release.
+
+    Stays silent on any failure (offline, API error, rate limit) so it can
+    never interrupt normal use.
+    """
+    update_available = pyqtSignal(str, str)   # latest_version, release_url
+    finished = pyqtSignal()
+
+    def run(self):
+        try:
+            result = fetch_latest_release()
+            if result is not None:
+                latest_version, release_url = result
+                if _parse_version(latest_version) > _parse_version(APP_VERSION):
+                    self.update_available.emit(latest_version, release_url)
+        except Exception:
+            pass
+        finally:
+            self.finished.emit()
+
+
 class UploaderGUI(QWidget):
     def __init__(self):
         super().__init__()
@@ -2069,6 +2139,8 @@ class UploaderGUI(QWidget):
         self.login_driver = None
         self.thread = None
         self.worker = None
+        self.update_thread = None
+        self.update_checker = None
         self.running_task_indices = []
         self.parallel_threads = []
         self.parallel_workers = []
@@ -2084,9 +2156,45 @@ class UploaderGUI(QWidget):
         if self.tasks:
             self.load_task_into_form(self.tasks[self.current_task_index if self.current_task_index >= 0 else 0])
         self._initializing = False
+        self.start_update_check()
+
+    def start_update_check(self):
+        """Kick off a non-blocking check for a newer release on GitHub."""
+        if _parse_version(APP_VERSION) == (0,):
+            return  # unknown / dev version — nothing meaningful to compare
+        self.update_thread = QThread(self)
+        self.update_checker = UpdateChecker()
+        self.update_checker.moveToThread(self.update_thread)
+        self.update_thread.started.connect(self.update_checker.run)
+        self.update_checker.update_available.connect(self.on_update_available)
+        self.update_checker.finished.connect(self.update_thread.quit)
+        self.update_checker.finished.connect(self.update_checker.deleteLater)
+        self.update_thread.finished.connect(self.update_thread.deleteLater)
+        self.update_thread.start()
+
+    def on_update_available(self, latest_version: str, release_url: str):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("มีเวอร์ชันใหม่")
+        box.setText(
+            "INKMYNOVEL มีเวอร์ชันใหม่ให้อัปเดตแล้ว\n\n"
+            f"เวอร์ชันที่ใช้อยู่ : v{APP_VERSION}\n"
+            f"เวอร์ชันล่าสุด : v{latest_version}\n\n"
+            "ต้องการเปิดหน้าดาวน์โหลดเลยไหม?"
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        yes_button = box.button(QMessageBox.StandardButton.Yes)
+        no_button = box.button(QMessageBox.StandardButton.No)
+        if yes_button is not None:
+            yes_button.setText("เปิดหน้าดาวน์โหลด")
+        if no_button is not None:
+            no_button.setText("ไว้ทีหลัง")
+        if box.exec() == QMessageBox.StandardButton.Yes:
+            import webbrowser
+            webbrowser.open(release_url)
 
     def init_ui(self):
-        self.setWindowTitle("โปรแกรมอัปโหลดนิยายอัตโนมัติ - Enhanced Version")
+        self.setWindowTitle(f"INKMYNOVEL v{APP_VERSION} - โปรแกรมอัปโหลดนิยายอัตโนมัติ")
         self.setWindowIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
         screen = self.screen().availableGeometry()
         screen_width = screen.width()

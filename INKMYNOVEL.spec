@@ -31,6 +31,11 @@ elif is_macos and os.path.exists(os.path.join("assets", "icon.icns")):
 # bundle it so the frozen app can still auto-resolve chromedriver.
 datas = collect_data_files("selenium")
 
+# Bundle the VERSION file so the app knows its own version at runtime
+# (used for the GitHub release update check).
+if os.path.exists("VERSION"):
+    datas += [("VERSION", ".")]
+
 hiddenimports = [
     "PyQt6.QtCore",
     "PyQt6.QtGui",

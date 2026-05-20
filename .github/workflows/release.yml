@@ -32,6 +32,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Stamp release version
+        shell: bash
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+
       - name: Build INKMYNOVEL.exe
         run: python -m PyInstaller --noconfirm --clean INKMYNOVEL.spec
 
@@ -65,6 +69,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+
+      - name: Stamp release version
+        shell: bash
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
 
       - name: Build INKMYNOVEL.app
         run: python -m PyInstaller --noconfirm --clean INKMYNOVEL.spec
