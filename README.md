@@ -49,10 +49,14 @@
 3. ถ้ามีแถบเตือนของ Windows ขึ้น → กด **More info** → **Run anyway**
 
 **บน macOS**
-1. ดาวน์โหลด `InkMyNovel.dmg`
+1. ดาวน์โหลดไฟล์ `.dmg` ให้ตรงกับชิปของเครื่อง
+   - Mac ชิป Apple (M1/M2/M3/M4) → `InkMyNovel-arm64.dmg`
+   - Mac ชิป Intel (รุ่นเก่า) → `InkMyNovel-intel.dmg`
 2. เปิดไฟล์ `.dmg` แล้วลากแอป `InkMyNovel` ไปวางในโฟลเดอร์ `Applications`
 3. ครั้งแรกให้ **คลิกขวาที่แอป → Open → Open** (เพื่อผ่านด่าน Gatekeeper)
 4. ครั้งต่อ ๆ ไปดับเบิลคลิกได้ตามปกติ
+
+> ไม่แน่ใจว่าเครื่องใช้ชิปอะไร? กดเมนู  ด้านบนซ้าย → **About This Mac** แล้วดูบรรทัด "Chip" หรือ "Processor"
 
 ### แบบที่ 2 — รันจากซอร์สโค้ด
 
@@ -97,7 +101,8 @@ scripts\build.bat
 ### ออก Release อัตโนมัติ
 
 โปรเจกต์มี GitHub Actions ([.github/workflows/release.yml](.github/workflows/release.yml)) ไว้ build ให้ครบทั้งสองระบบ
-เมื่อ push git tag แบบ `vX.Y.Z` ระบบจะ build `InkMyNovel.exe` และ `InkMyNovel.dmg` ให้อัตโนมัติ
+เมื่อ push git tag แบบ `vX.Y.Z` ระบบจะ build ให้อัตโนมัติทั้ง `InkMyNovel.exe` (Windows),
+`InkMyNovel-arm64.dmg` (Mac ชิป Apple) และ `InkMyNovel-intel.dmg` (Mac ชิป Intel)
 แล้วสร้าง Release พร้อมไฟล์ให้ดาวน์โหลด
 
 ```bash
