@@ -43,7 +43,36 @@ from PyQt6.QtWidgets import (
 )
 
 # Core definitions (inlined from inkxmynovel.py)
-APP_DIR = Path(__file__).resolve().parent
+IS_FROZEN = getattr(sys, "frozen", False)
+
+
+def _user_data_dir() -> Path:
+    """Per-user folder for config / progress / automation profile data.
+
+    The packaged build runs from a read-only (and, for a single-file build,
+    temporary) bundle, so user data cannot live next to the program.
+    Running from source keeps data next to this .py file, so the existing
+    developer workflow is unchanged.
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = str(Path.home() / "Library" / "Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "InkMyNovel"
+
+
+if IS_FROZEN:
+    APP_DIR = _user_data_dir()
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    # Windowed builds may have no real stdout/stderr — keep print() safe.
+    for _std in ("stdout", "stderr"):
+        if getattr(sys, _std, None) is None:
+            setattr(sys, _std, open(os.devnull, "w", encoding="utf-8"))
+else:
+    APP_DIR = Path(__file__).resolve().parent
+
 DEFAULT_PRICE = 20
 
 
@@ -162,22 +191,50 @@ def compute_schedule_datetimes(file_count: int, cfg: ScheduleConfig):
 
 
 def detect_chrome_path() -> str:
-    common_paths = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    ]
+    if sys.platform == "win32":
+        common_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+    elif sys.platform == "darwin":
+        common_paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ]
+    else:
+        common_paths = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ]
     for p in common_paths:
         if os.path.exists(p):
             return p
+    # Fall back to anything resolvable on PATH.
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
+        found = shutil.which(name)
+        if found:
+            return found
     return ""
 
 
+def detect_chrome_user_data_dir() -> Optional[Path]:
+    """Locate Chrome's real 'User Data' directory for the current OS."""
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if not local_app_data:
+            return None
+        return Path(local_app_data) / "Google" / "Chrome" / "User Data"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
+    return Path.home() / ".config" / "google-chrome"
+
+
 def load_chrome_profiles():
-    local_app_data = os.environ.get("LOCALAPPDATA", "")
-    if not local_app_data:
-        return []
-    user_data_dir = Path(local_app_data) / "Google" / "Chrome" / "User Data"
-    if not user_data_dir.exists():
+    user_data_dir = detect_chrome_user_data_dir()
+    if user_data_dir is None or not user_data_dir.exists():
         return []
 
     local_state = read_json(user_data_dir / "Local State", {})

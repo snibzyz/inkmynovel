@@ -1,0 +1,102 @@
+# -*- mode: python ; coding: utf-8 -*-
+# PyInstaller spec for InkMyNovel Uploader (cross-platform, single file).
+#
+# Build:
+#   python -m PyInstaller --noconfirm --clean InkMyNovel.spec
+#
+# Output:
+#   Windows : dist/InkMyNovel.exe   (portable single file, windowed)
+#   macOS   : dist/InkMyNovel.app   (windowed app bundle)
+#   Linux   : dist/InkMyNovel       (portable single file)
+#
+# Note: Google Chrome is NOT bundled — it must already be installed on the
+# target machine. The matching chromedriver is fetched by Selenium Manager.
+
+import os
+import sys
+
+from PyInstaller.utils.hooks import collect_data_files
+
+is_macos = sys.platform == "darwin"
+is_windows = sys.platform == "win32"
+
+# Optional app icon: used only if the file exists under assets/.
+icon_path = None
+if is_windows and os.path.exists(os.path.join("assets", "icon.ico")):
+    icon_path = os.path.join("assets", "icon.ico")
+elif is_macos and os.path.exists(os.path.join("assets", "icon.icns")):
+    icon_path = os.path.join("assets", "icon.icns")
+
+# Selenium ships the "Selenium Manager" helper binary as package data;
+# bundle it so the frozen app can still auto-resolve chromedriver.
+datas = collect_data_files("selenium")
+
+hiddenimports = [
+    "PyQt6.QtCore",
+    "PyQt6.QtGui",
+    "PyQt6.QtWidgets",
+]
+
+a = Analysis(
+    ["inkxmynovel_pyqt.py"],
+    pathex=[],
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[
+        "tkinter",
+        "PyQt6.QtNetwork",
+        "PyQt6.QtQml",
+        "PyQt6.QtQuick",
+        "PyQt6.QtWebEngineCore",
+        "PyQt6.QtWebEngineWidgets",
+        "PyQt6.QtMultimedia",
+        "PyQt6.QtSql",
+        "PyQt6.QtTest",
+        "PyQt6.Qt3DCore",
+    ],
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name="InkMyNovel",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,                 # keep off: UPX-packed exes trip some antivirus scanners
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,             # GUI app — no console window
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=icon_path,
+)
+
+if is_macos:
+    app = BUNDLE(
+        exe,
+        name="InkMyNovel.app",
+        icon=icon_path,
+        bundle_identifier="com.snibzyz.inkmynovel",
+        info_plist={
+            "CFBundleName": "InkMyNovel",
+            "CFBundleDisplayName": "InkMyNovel Uploader",
+            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleVersion": "1.0.0",
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "11.0",
+        },
+    )

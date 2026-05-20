@@ -6,6 +6,10 @@ __pycache__/
 .venv/
 venv/
 
+# PyInstaller build output
+build/
+dist/
+
 # Local app data
 config.json
 inkxmynovel_novel_list.txt
